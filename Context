@@ -1,0 +1,27 @@
+CONTEXT: NVIDIA GTC GOLDEN TICKET CONTEST
+
+I'm entering a contest to win a Golden Ticket to NVIDIA GTC 2026.
+
+CONTEST REQUIREMENTS (from Bryan Catanzaro, VP of Deep Learning Research at NVIDIA):
+- Build an awesome open source project
+- Must use NVIDIA technology
+- Must use NVIDIA Nemotron models
+- Post about it on X, tag @Baxate, use #NvidiaGTC
+- Deadline: February 15, 2026
+- Winner announced: February 25, 2026
+
+PRIZES:
+- GTC 2026 Conference Pass with VIP keynote seating
+- NVIDIA DGX Spark (personal AI supercomputer)
+- Happy hour at NVIDIA HQ
+- Training Lab Pass
+- Merch
+
+WHY THIS MATTERS:
+Bryan will see hundreds of submissions. Most will be basic chatbots or simple wrappers. I need something that:
+1. Stands out visually (great demo in a tweet)
+2. Shows real engineering (not just an API wrapper)
+3. Uses Nemotron in an interesting way
+4. Is actually useful
+5. Is fully open source
+

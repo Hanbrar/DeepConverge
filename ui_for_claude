@@ -1,0 +1,46 @@
+UI Description for Claude Code
+
+Overall Style:
+Soft, minimal, modern SaaS interface. Feels premium but approachable. Light and airy with generous whitespace.
+Background:
+Soft gradient — pale pink/lavender to light cream/white. Very subtle, almost pastel. Not flat white, has gentle warmth.
+Color Palette:
+
+Background: Soft pink-lavender gradient (#f5f0f5 → #faf8f7)
+Cards: White with slight transparency/glassmorphism
+Primary accent: Coral/salmon orange (#f08a7a or similar)
+Icons: Dark charcoal (#2d2d2d) on light rounded square backgrounds
+Text: Dark gray for headings, medium gray for subtext
+
+Typography:
+
+Clean sans-serif (Inter, SF Pro, or similar)
+Hero heading: Large, mixed weight — greeting lighter, question bolder
+Subtext: Small, muted gray, generous line height
+
+Cards:
+
+Pure white or very subtle transparency
+Large border radius (~16-20px)
+Very soft drop shadow (barely visible)
+Icon in dark rounded square at top left of each card
+Title + subtitle beneath icon
+
+Input Bar:
+
+Floating at bottom center
+Pill-shaped, white background
+Subtle shadow
+Icon on left, coral "Send" button on right with arrow
+Rounded send button matches accent color
+
+Layout:
+
+Centered content
+Logo top left, user avatar top right
+Hero content middle (icon, greeting, prompt)
+Suggestion cards at bottom in horizontal row
+Generous padding everywhere
+
+Vibe:
+Clean, calm, inviting. Not sterile — has warmth from the pink tones and coral accent. Premium consumer product feel.
