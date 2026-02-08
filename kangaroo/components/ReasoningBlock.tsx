@@ -12,8 +12,8 @@ interface ReasoningBlockProps {
   agentName: string;
 }
 
-export default function ReasoningBlock({ reasoning, agentName }: ReasoningBlockProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
+export default function ReasoningBlock({ reasoning, agentName: _agentName }: ReasoningBlockProps) {
+  const [isExpanded, setIsExpanded] = useState(true);
 
   if (!reasoning) return null;
 

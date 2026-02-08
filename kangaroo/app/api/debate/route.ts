@@ -10,9 +10,14 @@ interface ChatMessage {
   content: string;
 }
 
+interface StreamChunk {
+  type: "reasoning" | "content";
+  text: string;
+}
+
 async function* streamFromOpenRouter(
   messages: ChatMessage[]
-): AsyncGenerator<string> {
+): AsyncGenerator<StreamChunk> {
   const response = await fetch(OPENROUTER_API_URL, {
     method: "POST",
     headers: {
@@ -26,7 +31,11 @@ async function* streamFromOpenRouter(
       messages,
       stream: true,
       temperature: 0.7,
-      max_tokens: 1024,
+      max_tokens: 4096,
+      // Enable OpenRouter's native reasoning feature
+      reasoning: {
+        effort: "high",
+      },
     }),
   });
 
@@ -56,8 +65,16 @@ async function* streamFromOpenRouter(
 
         try {
           const parsed = JSON.parse(data);
-          const content = parsed.choices?.[0]?.delta?.content || "";
-          if (content) yield content;
+          const delta = parsed.choices?.[0]?.delta;
+
+          // Handle native reasoning tokens from OpenRouter
+          if (delta?.reasoning) {
+            yield { type: "reasoning", text: delta.reasoning };
+          }
+          // Handle regular content
+          if (delta?.content) {
+            yield { type: "content", text: delta.content };
+          }
         } catch {
           // Skip invalid JSON
         }
@@ -80,10 +97,35 @@ export async function POST(request: NextRequest) {
     const encoder = new TextEncoder();
     const responses: { role: AgentRole; content: string }[] = [];
 
+    let isClosed = false;
+
     const stream = new ReadableStream({
       async start(controller) {
+        const safeEnqueue = (data: Uint8Array) => {
+          if (!isClosed) {
+            try {
+              controller.enqueue(data);
+            } catch {
+              isClosed = true;
+            }
+          }
+        };
+
+        const safeClose = () => {
+          if (!isClosed) {
+            isClosed = true;
+            try {
+              controller.close();
+            } catch {
+              // Already closed
+            }
+          }
+        };
+
         try {
           for (const agentRole of agentOrder) {
+            if (isClosed) break;
+
             const agent = agents[agentRole];
             const messages: ChatMessage[] = [
               { role: "system", content: agent.systemPrompt },
@@ -111,7 +153,7 @@ export async function POST(request: NextRequest) {
             }
 
             // Signal start of this agent
-            controller.enqueue(
+            safeEnqueue(
               encoder.encode(
                 `data: ${JSON.stringify({ agent: agentRole, type: "start" })}\n\n`
               )
@@ -119,42 +161,22 @@ export async function POST(request: NextRequest) {
 
             let fullContent = "";
             let reasoning = "";
-            let inReasoning = false;
 
             for await (const chunk of streamFromOpenRouter(messages)) {
-              // Handle reasoning tags
-              if (chunk.includes("<think>")) {
-                inReasoning = true;
-              }
+              if (isClosed) break;
 
-              if (inReasoning) {
-                reasoning += chunk;
-                if (chunk.includes("</think>")) {
-                  inReasoning = false;
-                  // Extract clean reasoning
-                  const match = reasoning.match(/<think>([\s\S]*?)<\/think>/);
-                  if (match) {
-                    reasoning = match[1].trim();
-                    controller.enqueue(
-                      encoder.encode(
-                        `data: ${JSON.stringify({ agent: agentRole, type: "reasoning", content: reasoning })}\n\n`
-                      )
-                    );
-                  }
-                  // Get any content after </think>
-                  const afterThink = chunk.split("</think>")[1] || "";
-                  if (afterThink) {
-                    fullContent += afterThink;
-                    controller.enqueue(
-                      encoder.encode(
-                        `data: ${JSON.stringify({ agent: agentRole, type: "content", content: fullContent })}\n\n`
-                      )
-                    );
-                  }
-                }
-              } else {
-                fullContent += chunk;
-                controller.enqueue(
+              if (chunk.type === "reasoning") {
+                // Stream reasoning tokens
+                reasoning += chunk.text;
+                safeEnqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({ agent: agentRole, type: "reasoning", content: reasoning })}\n\n`
+                  )
+                );
+              } else if (chunk.type === "content") {
+                // Stream content tokens
+                fullContent += chunk.text;
+                safeEnqueue(
                   encoder.encode(
                     `data: ${JSON.stringify({ agent: agentRole, type: "content", content: fullContent })}\n\n`
                   )
@@ -163,7 +185,7 @@ export async function POST(request: NextRequest) {
             }
 
             // Signal end of this agent
-            controller.enqueue(
+            safeEnqueue(
               encoder.encode(
                 `data: ${JSON.stringify({ agent: agentRole, type: "done", content: fullContent, reasoning })}\n\n`
               )
@@ -173,19 +195,22 @@ export async function POST(request: NextRequest) {
           }
 
           // Signal debate complete
-          controller.enqueue(
+          safeEnqueue(
             encoder.encode(`data: ${JSON.stringify({ type: "complete" })}\n\n`)
           );
-          controller.close();
+          safeClose();
         } catch (error) {
           console.error("Debate error:", error);
-          controller.enqueue(
+          safeEnqueue(
             encoder.encode(
               `data: ${JSON.stringify({ type: "error", message: String(error) })}\n\n`
             )
           );
-          controller.close();
+          safeClose();
         }
+      },
+      cancel() {
+        isClosed = true;
       },
     });
 

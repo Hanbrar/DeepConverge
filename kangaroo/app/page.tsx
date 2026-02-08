@@ -3,8 +3,10 @@
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
+import remarkGfm from "remark-gfm";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
+import { preprocessLaTeX } from "@/lib/latex";
 
 interface Message {
   id: string;
@@ -45,11 +47,16 @@ export default function Home() {
     setInput("");
     setIsLoading(true);
 
+    // Create AbortController with 5-minute timeout for long reasoning tasks
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), 300000);
+
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: input.trim() }),
+        signal: abortController.signal,
       });
 
       if (!response.ok) {
@@ -108,14 +115,22 @@ export default function Home() {
       }
     } catch (error) {
       console.error("Error:", error);
+      const isTimeout = error instanceof Error && error.name === "AbortError";
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantMessage.id
-            ? { ...msg, content: "Sorry, there was an error. Please try again.", isStreaming: false }
+            ? {
+                ...msg,
+                content: isTimeout
+                  ? "The request took too long. The reasoning above shows the progress made. Please try a simpler question or try again."
+                  : "Sorry, there was an error. Please try again.",
+                isStreaming: false,
+              }
             : msg
         )
       );
     } finally {
+      clearTimeout(timeoutId);
       setIsLoading(false);
     }
   };
@@ -173,8 +188,20 @@ export default function Home() {
                     {/* Reasoning block - always visible when present */}
                     {message.reasoning && (
                       <div className="bg-[#f9fafb] border border-[#e5e7eb] rounded-xl overflow-hidden">
-                        <div className="px-4 py-2 border-b border-[#e5e7eb] text-sm font-medium text-[#4b5563]">
-                          Reasoning
+                        <div className="px-4 py-2 border-b border-[#e5e7eb] text-sm font-medium text-[#4b5563] flex items-center gap-2">
+                          {message.isStreaming && !message.content ? (
+                            <>
+                              <span className="w-2 h-2 bg-amber-500 rounded-full animate-pulse" />
+                              Thinking...
+                            </>
+                          ) : (
+                            <>
+                              <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                              </svg>
+                              Reasoning
+                            </>
+                          )}
                         </div>
                         <div className="px-4 py-3 text-sm text-[#4b5563] whitespace-pre-wrap max-h-64 overflow-y-auto">
                           {message.reasoning}
@@ -185,19 +212,36 @@ export default function Home() {
                       </div>
                     )}
 
-                    {/* Main content */}
-                    {(message.content || !message.reasoning) && (
-                      <div className="bg-white rounded-2xl rounded-tl-md px-5 py-4 shadow-sm">
-                        <div className="prose prose-sm max-w-none">
-                          <ReactMarkdown
-                            remarkPlugins={[remarkMath]}
-                            rehypePlugins={[rehypeKatex]}
-                          >
-                            {message.content || (message.isStreaming ? "" : "...")}
-                          </ReactMarkdown>
-                          {message.isStreaming && message.content && (
-                            <span className="inline-block w-2 h-4 bg-[#2d2d2d]/50 animate-pulse ml-1" />
+                    {/* Answer box - shows after reasoning */}
+                    {(message.content || (!message.reasoning && !message.isStreaming)) && (
+                      <div className="bg-white rounded-2xl rounded-tl-md overflow-hidden shadow-sm border border-[#e5e7eb]">
+                        <div className="px-4 py-2 border-b border-[#e5e7eb] bg-[#f9fafb] flex items-center gap-2">
+                          {message.isStreaming ? (
+                            <>
+                              <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+                              <span className="text-sm font-medium text-[#4b5563]">Answer</span>
+                            </>
+                          ) : (
+                            <>
+                              <svg className="w-4 h-4 text-[#76b900]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                              <span className="text-sm font-medium text-[#4b5563]">Answer</span>
+                            </>
                           )}
+                        </div>
+                        <div className="px-5 py-4">
+                          <div className="prose prose-sm max-w-none prose-headings:text-[#2d2d2d] prose-p:text-[#374151] prose-strong:text-[#1f2937] prose-code:bg-[#f3f4f6] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[#1f2937] prose-pre:text-gray-100">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkMath, remarkGfm]}
+                              rehypePlugins={[rehypeKatex]}
+                            >
+                              {preprocessLaTeX(message.content || "...")}
+                            </ReactMarkdown>
+                            {message.isStreaming && message.content && (
+                              <span className="inline-block w-2 h-4 bg-[#2d2d2d]/50 animate-pulse ml-1" />
+                            )}
+                          </div>
                         </div>
                       </div>
                     )}

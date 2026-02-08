@@ -9,7 +9,7 @@ interface DebateStreamProps {
   currentAgent?: string;
 }
 
-export default function DebateStream({ messages, currentAgent }: DebateStreamProps) {
+export default function DebateStream({ messages, currentAgent: _currentAgent }: DebateStreamProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {

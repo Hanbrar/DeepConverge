@@ -34,13 +34,17 @@ export async function POST(request: NextRequest) {
         model: MODEL,
         messages: [
           {
+            role: "system",
+            content: "You are a helpful AI assistant. Think through problems step by step before providing your answer.",
+          },
+          {
             role: "user",
             content: message,
           },
         ],
         stream: true,
         temperature: 0.7,
-        max_tokens: 2048,
+        max_tokens: 8192,
       }),
     });
 
@@ -67,7 +71,6 @@ export async function POST(request: NextRequest) {
         let buffer = "";
         let reasoning = "";
         let content = "";
-        let inReasoning = false;
 
         try {
           while (true) {
@@ -85,57 +88,28 @@ export async function POST(request: NextRequest) {
 
                 try {
                   const parsed = JSON.parse(data);
-                  const chunk = parsed.choices?.[0]?.delta?.content || "";
+                  const delta = parsed.choices?.[0]?.delta;
 
-                  if (chunk) {
-                    // Check for reasoning tags
-                    const fullText = (inReasoning ? reasoning : content) + chunk;
+                  // Handle reasoning from Nemotron's native reasoning field
+                  const reasoningChunk = delta?.reasoning || "";
+                  if (reasoningChunk) {
+                    reasoning += reasoningChunk;
+                    controller.enqueue(
+                      encoder.encode(
+                        `data: ${JSON.stringify({ type: "reasoning", content: reasoning })}\n\n`
+                      )
+                    );
+                  }
 
-                    if (chunk.includes("<think>") || fullText.includes("<think>")) {
-                      inReasoning = true;
-                    }
-
-                    if (inReasoning) {
-                      reasoning += chunk;
-
-                      // Check if reasoning ended
-                      if (reasoning.includes("</think>")) {
-                        inReasoning = false;
-                        const parts = reasoning.split("</think>");
-                        reasoning = parts[0].replace("<think>", "").trim();
-                        content += parts[1] || "";
-
-                        // Send reasoning complete
-                        controller.enqueue(
-                          encoder.encode(
-                            `data: ${JSON.stringify({ type: "reasoning", content: reasoning, done: true })}\n\n`
-                          )
-                        );
-
-                        // Send content if any
-                        if (content) {
-                          controller.enqueue(
-                            encoder.encode(
-                              `data: ${JSON.stringify({ type: "content", content })}\n\n`
-                            )
-                          );
-                        }
-                      } else {
-                        // Still in reasoning, send update
-                        controller.enqueue(
-                          encoder.encode(
-                            `data: ${JSON.stringify({ type: "reasoning", content: reasoning.replace("<think>", ""), done: false })}\n\n`
-                          )
-                        );
-                      }
-                    } else {
-                      content += chunk;
-                      controller.enqueue(
-                        encoder.encode(
-                          `data: ${JSON.stringify({ type: "content", content })}\n\n`
-                        )
-                      );
-                    }
+                  // Handle content
+                  const contentChunk = delta?.content || "";
+                  if (contentChunk) {
+                    content += contentChunk;
+                    controller.enqueue(
+                      encoder.encode(
+                        `data: ${JSON.stringify({ type: "content", content })}\n\n`
+                      )
+                    );
                   }
                 } catch {
                   // Skip invalid JSON
@@ -144,16 +118,20 @@ export async function POST(request: NextRequest) {
             }
           }
 
-          // Send final done signal
+          // Send final done signal and close
           controller.enqueue(
             encoder.encode(
               `data: ${JSON.stringify({ type: "done", reasoning, content })}\n\n`
             )
           );
+          controller.close();
         } catch (error) {
           console.error("Stream error:", error);
-        } finally {
-          controller.close();
+          try {
+            controller.close();
+          } catch {
+            // Controller may already be closed
+          }
         }
       },
     });

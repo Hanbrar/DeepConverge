@@ -125,13 +125,13 @@ export async function runDebate(
 
   for (const agentRole of agentOrder) {
     let finalContent = "";
-    let finalReasoning = "";
+    let _finalReasoning = "";
 
     for await (const chunk of streamAgentResponse(agentRole, question, responses)) {
       onChunk(chunk);
       if (chunk.done) {
         finalContent = chunk.content;
-        finalReasoning = chunk.reasoning || "";
+        _finalReasoning = chunk.reasoning || "";
       }
     }
 
