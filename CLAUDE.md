@@ -11,7 +11,7 @@ Users ask questions and watch 3 AI agents (Advocate, Critic, Judge) debate in re
 ## Tech Stack
 
 - **Frontend:** Next.js 14 (App Router) + React + Tailwind CSS
-- **AI Model:** `nvidia/llama-3.1-nemotron-70b-instruct:free` via OpenRouter
+- **AI Model:**  via OpenRouter
 - **Streaming:** Server-Sent Events (SSE) for real-time debate
 
 ## Commands

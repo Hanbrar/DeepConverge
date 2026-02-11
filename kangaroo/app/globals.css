@@ -147,3 +147,67 @@ body {
   stroke-dasharray: 5, 5;
   animation: flow 1s linear infinite;
 }
+
+/* Debate log scrollable container */
+.debate-log-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+
+.debate-log-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.debate-log-scroll::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 10px;
+}
+
+/* Debate canvas animations */
+@keyframes pulse-subtle {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0.05); }
+  50% { box-shadow: 0 0 20px 4px rgba(0, 0, 0, 0.08); }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2s ease-in-out infinite;
+}
+
+/* Speech bubble arrow indicators */
+.speech-bubble-blue::after {
+  content: "";
+  position: absolute;
+  bottom: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-top: 8px solid rgb(191 219 254);
+}
+
+.speech-bubble-red::after {
+  content: "";
+  position: absolute;
+  bottom: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-top: 8px solid rgb(254 202 202);
+}
+
+.speech-bubble-mod::after {
+  content: "";
+  position: absolute;
+  bottom: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-top: 8px solid rgb(229 231 235);
+}
