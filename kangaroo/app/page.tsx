@@ -8,7 +8,6 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { preprocessLaTeX } from "@/lib/latex";
 import DebateCanvas from "@/components/DebateCanvas";
-import RegularDebate from "@/components/RegularDebate";
 
 interface Message {
   id: string;
@@ -19,7 +18,6 @@ interface Message {
 }
 
 type AppMode = "home" | "chat" | "debate-setup" | "debate-active";
-type DebateViewMode = "canvas" | "no-canvas";
 type DebateType = "regular" | "continuous";
 
 export default function Home() {
@@ -31,9 +29,8 @@ export default function Home() {
 
   // Debate state
   const [debateQuestion, setDebateQuestion] = useState("");
-  const [debateViewMode, setDebateViewMode] = useState<DebateViewMode>("canvas");
   const [debateType, setDebateType] = useState<DebateType>("regular");
-  const [continuousRounds, setContinuousRounds] = useState(4);
+  const [continuousRounds, setContinuousRounds] = useState(3);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -162,17 +159,8 @@ export default function Home() {
 
   // --- DEBATE ACTIVE VIEW ---
   if (appMode === "debate-active") {
-    if (debateViewMode === "canvas") {
-      return (
-        <DebateCanvas
-          question={debateQuestion}
-          rounds={debateRounds}
-          onBack={goHome}
-        />
-      );
-    }
     return (
-      <RegularDebate
+      <DebateCanvas
         question={debateQuestion}
         rounds={debateRounds}
         onBack={goHome}
@@ -397,58 +385,6 @@ export default function Home() {
               />
             </div>
 
-            {/* View mode selection */}
-            <div>
-              <label className="block text-sm font-medium text-[#2d2d2d] mb-3">
-                View Mode
-              </label>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  onClick={() => setDebateViewMode("canvas")}
-                  className={`relative p-4 rounded-xl border-2 transition-all text-left ${
-                    debateViewMode === "canvas"
-                      ? "border-[#f08a7a] bg-[#f08a7a]/5 shadow-sm"
-                      : "border-[#e5e7eb] bg-white hover:border-[#d1d5db]"
-                  }`}
-                >
-                  <div className="text-2xl mb-2">🎭</div>
-                  <div className="font-medium text-[#2d2d2d] text-sm">Canvas</div>
-                  <div className="text-xs text-[#6b7280] mt-1">
-                    Visual arena with avatars and speech bubbles
-                  </div>
-                  {debateViewMode === "canvas" && (
-                    <div className="absolute top-2 right-2 w-5 h-5 bg-[#f08a7a] rounded-full flex items-center justify-center">
-                      <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                      </svg>
-                    </div>
-                  )}
-                </button>
-
-                <button
-                  onClick={() => setDebateViewMode("no-canvas")}
-                  className={`relative p-4 rounded-xl border-2 transition-all text-left ${
-                    debateViewMode === "no-canvas"
-                      ? "border-[#f08a7a] bg-[#f08a7a]/5 shadow-sm"
-                      : "border-[#e5e7eb] bg-white hover:border-[#d1d5db]"
-                  }`}
-                >
-                  <div className="text-2xl mb-2">💬</div>
-                  <div className="font-medium text-[#2d2d2d] text-sm">No Canvas</div>
-                  <div className="text-xs text-[#6b7280] mt-1">
-                    Clean text-based debate log
-                  </div>
-                  {debateViewMode === "no-canvas" && (
-                    <div className="absolute top-2 right-2 w-5 h-5 bg-[#f08a7a] rounded-full flex items-center justify-center">
-                      <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                      </svg>
-                    </div>
-                  )}
-                </button>
-              </div>
-            </div>
-
             {/* Debate type */}
             <div>
               <label className="block text-sm font-medium text-[#2d2d2d] mb-3">
@@ -488,7 +424,7 @@ export default function Home() {
                   <div className="text-2xl mb-2">🔄</div>
                   <div className="font-medium text-[#2d2d2d] text-sm">Continuous</div>
                   <div className="text-xs text-[#6b7280] mt-1">
-                    Set custom rounds (up to 10)
+                    Set custom rounds (up to 5)
                   </div>
                   {debateType === "continuous" && (
                     <div className="absolute top-2 right-2 w-5 h-5 bg-[#f08a7a] rounded-full flex items-center justify-center">
@@ -510,15 +446,15 @@ export default function Home() {
                   <input
                     type="range"
                     min="1"
-                    max="10"
+                    max="5"
                     value={continuousRounds}
                     onChange={(e) => setContinuousRounds(parseInt(e.target.value))}
                     className="w-full accent-[#f08a7a]"
                   />
                   <div className="flex justify-between text-xs text-[#9ca3af] mt-1">
                     <span>1</span>
+                    <span>3</span>
                     <span>5</span>
-                    <span>10</span>
                   </div>
                   <p className="text-xs text-[#6b7280] mt-2">
                     {continuousRounds} round{continuousRounds > 1 ? "s" : ""} = {continuousRounds * 2} exchanges (Blue + Red each round)

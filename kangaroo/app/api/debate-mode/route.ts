@@ -26,7 +26,8 @@ interface SearchResult {
 const MODERATOR_SYSTEM = `You are the Moderator in a live debate.
 Output only one line that starts with "Moderator:" followed by what you say.
 Do not include any other text. No planning, no notes, no formatting.
-Speak like a warm human judge. Pick a winner and end with an encouraging remark.`;
+You MUST pick exactly one winner: Blue or Red. No ties, no draws, no "both sides."
+State who won and give one clear reason. End with a short encouraging remark.`;
 
 const MODERATOR_INTRO_SYSTEM = `You are the Moderator in a live debate.
 Output only one line that starts with "Moderator:" followed by what you say.
@@ -444,7 +445,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const clampedRounds = Math.min(Math.max(1, rounds), 10);
+    const clampedRounds = Math.min(Math.max(1, rounds), 5);
     const encoder = new TextEncoder();
     const debateHistory: { speaker: string; content: string }[] = [];
 
@@ -527,58 +528,66 @@ export async function POST(request: NextRequest) {
           debateHistory.push({ speaker: "moderator", content: cleanedModIntro });
 
           // ── DEBATE ROUNDS ───────────────────────────────────
-          // Order determined by coin toss
+          // Flat alternating loop: speaker A → speaker B → A → B ...
+          // Each speaker ONLY sees opponent's last message, never own prior output.
           const order: ("blue" | "red")[] = blueFirst
             ? ["blue", "red"]
             : ["red", "blue"];
 
-          for (let round = 0; round < clampedRounds; round++) {
+          // Build flat turn sequence
+          const turns: ("blue" | "red")[] = [];
+          for (let r = 0; r < clampedRounds; r++) {
+            for (const s of order) turns.push(s);
+          }
+
+          let lastBlueMsg = "";
+          let lastRedMsg = "";
+
+          for (let i = 0; i < turns.length; i++) {
             if (isClosed) break;
 
-            for (const speaker of order) {
-              if (isClosed) break;
+            const speaker = turns[i];
+            const isFor = speaker === "blue";
+            const opponent = isFor ? "Red" : "Blue";
+            const round = Math.floor(i / 2) + 1;
+            const label = `${speaker}-r${round}`;
+            console.log(`[debate-mode] ${label}: start`);
+            send({ speaker, type: "start", round });
 
-              const isFor = speaker === "blue";
-              const opponent = isFor ? "Red" : "Blue";
-              const label = `${speaker}-r${round + 1}`;
-              console.log(`[debate-mode] ${label}: start`);
-              send({ speaker, type: "start", round: round + 1 });
+            // Only feed opponent's last message (never own prior output)
+            const opponentLastMsg = isFor ? lastRedMsg : lastBlueMsg;
 
-              const context = debateHistory
-                .map((h) => `[${h.speaker.toUpperCase()}]: ${h.content}`)
-                .join("\n\n");
-
-              const lastOpponentMsg = debateHistory
-                .filter((h) => h.speaker !== speaker && h.speaker !== "moderator")
-                .pop();
-
-              const messages: ChatMessage[] = [
-                { role: "system", content: DEBATER_SYSTEM(isFor ? "FOR" : "AGAINST") },
-                {
-                  role: "user",
-                  content:
-                    round === 0 && !lastOpponentMsg
-                      ? `Topic: "${question}"\n\nThe moderator said: ${cleanedModIntro}\n\nMake your case.`
-                      : round === 0 && lastOpponentMsg
-                      ? `Topic: "${question}"\n\n${opponent} just said: ${lastOpponentMsg.content}\n\nPush back on that.`
-                      : `Topic: "${question}"\n\nSo far:\n${context}\n\nYour turn. Respond to what ${opponent} just said.`,
-                },
-              ];
-
-              let turnContent = "";
-
-              for await (const chunk of streamFromOpenRouter(messages, label)) {
-                if (isClosed) break;
-                if (chunk.type === "content" && chunk.text) {
-                  turnContent += chunk.text;
-                }
-              }
-
-              const cleaned = cleanDebateContent(turnContent, speaker);
-              console.log(`[debate-mode] ${label}: done (${cleaned.length} chars)`);
-              send({ speaker, type: "done", content: cleaned });
-              debateHistory.push({ speaker, content: cleaned });
+            let userContent: string;
+            if (i === 0) {
+              // First speaker: only has moderator intro
+              userContent = `Topic: "${question}"\n\nThe moderator said: ${cleanedModIntro}\n\nMake your case.`;
+            } else {
+              // Every subsequent turn: only opponent's last message
+              userContent = `Topic: "${question}"\n\n${opponent} just said: ${opponentLastMsg}\n\nRespond directly.`;
             }
+
+            const messages: ChatMessage[] = [
+              { role: "system", content: DEBATER_SYSTEM(isFor ? "FOR" : "AGAINST") },
+              { role: "user", content: userContent },
+            ];
+
+            let turnContent = "";
+
+            for await (const chunk of streamFromOpenRouter(messages, label)) {
+              if (isClosed) break;
+              if (chunk.type === "content" && chunk.text) {
+                turnContent += chunk.text;
+              }
+            }
+
+            const cleaned = cleanDebateContent(turnContent, speaker);
+            console.log(`[debate-mode] ${label}: done (${cleaned.length} chars)`);
+            send({ speaker, type: "done", content: cleaned });
+            debateHistory.push({ speaker, content: cleaned });
+
+            // Track last message per speaker (feeds into opponent's next turn)
+            if (speaker === "blue") lastBlueMsg = cleaned;
+            else lastRedMsg = cleaned;
           }
 
           if (isClosed) { safeClose(); return; }
