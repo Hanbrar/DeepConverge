@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "nvidia/nemotron-3-nano-30b-a3b:free";
+const MODEL = "nvidia/nemotron-nano-9b-v2:free";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 interface ChatMessage {
@@ -23,39 +23,21 @@ interface SearchResult {
 
 // ── System prompts ──────────────────────────────────────────────────
 
-const MODERATOR_SYSTEM = `You are a debate moderator. Professional, fair, and sharp.
+const MODERATOR_SYSTEM = `You are the Moderator in a live debate.
+Output only one line that starts with "Moderator:" followed by what you say.
+Do not include any other text. No planning, no notes, no formatting.
+Speak like a warm human judge. Pick a winner and end with an encouraging remark.`;
 
-Rules:
-- Present the topic in 1-2 sentences
-- For verdicts: declare a winner with a brief reason, or note a draw
-- Use bullet points for key observations
-- Keep response under 400 characters
+const MODERATOR_INTRO_SYSTEM = `You are the Moderator in a live debate.
+Output only one line that starts with "Moderator:" followed by what you say.
+Do not include any other text. No planning, no notes, no formatting.
+Introduce the topic and assign sides naturally.`;
 
-CRITICAL: Output ONLY your final response text. Do NOT include any thinking, planning, reasoning, meta-commentary, character counting, or drafting notes. Start your response directly with the actual content. Never write phrases like "We need to", "Let's craft", "Must be", "Should cite", or any self-talk.`;
-
-const BLUE_SYSTEM = `You are the BLUE debater. You argue FOR the proposition.
-
-Rules:
-- Present arguments as short bullet points (use "- " format)
-- Each point should be one clear, punchy sentence
-- Max 3-4 bullet points per response
-- Directly counter Red's points when responding
-- Keep response under 400 characters
-- Be persuasive but not aggressive
-
-CRITICAL: Output ONLY your bullet points. Do NOT include any thinking, planning, reasoning, meta-commentary, character counting, or drafting notes. Start immediately with your first bullet point. Never write phrases like "We need to", "Let's craft", "Must be", "Should cite", or any self-talk. Do not reference being an AI.`;
-
-const RED_SYSTEM = `You are the RED debater. You argue AGAINST the proposition.
-
-Rules:
-- Present arguments as short bullet points (use "- " format)
-- Each point should be one clear, punchy sentence
-- Max 3-4 bullet points per response
-- Directly counter Blue's points when responding
-- Keep response under 400 characters
-- Be rigorous but respectful
-
-CRITICAL: Output ONLY your bullet points. Do NOT include any thinking, planning, reasoning, meta-commentary, character counting, or drafting notes. Start immediately with your first bullet point. Never write phrases like "We need to", "Let's craft", "Must be", "Should cite", or any self-talk. Do not reference being an AI.`;
+const DEBATER_SYSTEM = (side: "FOR" | "AGAINST") =>
+  `You are ${side === "FOR" ? "Blue" : "Red"} in a live debate arguing ${side} the proposition.
+Output only one line that starts with "${side === "FOR" ? "Blue" : "Red"}:" followed by what you say.
+Do not include any other text. No planning, no notes, no formatting.
+Speak like a real human. Respond directly to your opponent.`;
 
 // ── Utility functions ───────────────────────────────────────────────
 
@@ -74,122 +56,217 @@ function extractText(value: unknown): string {
   return "";
 }
 
-function stripUrlsFromText(text: string): string {
-  let cleaned = text.replace(/\[([^\]]*)\]\(https?:\/\/[^)]+\)/g, "");
-  cleaned = cleaned.replace(/https?:\/\/[^\s<>"'`]+/g, "");
-  cleaned = cleaned.replace(/  +/g, " ").trim();
-  return cleaned;
+function stripUrls(text: string): string {
+  return text
+    .replace(/\[([^\]]*)\]\(https?:\/\/[^)]+\)/g, "")
+    .replace(/https?:\/\/[^\s<>"'`]+/g, "")
+    .replace(/\b\w+\.(?:com|org|net|edu|gov|io)\S*/gi, "")
+    .replace(/  +/g, " ")
+    .trim();
 }
 
-/** Extract bullet points from text (lines starting with "- " or "Bullet N:") */
-function extractBulletPoints(text: string): string | null {
-  const lines = text.split("\n");
-  const bullets: string[] = [];
+// ── Smart extraction ────────────────────────────────────────────────
+// Instead of pattern-matching CoT (whack-a-mole), we extract the
+// model's actual spoken answer from its reasoning output.
+//
+// The model's reasoning typically looks like:
+//   [Planning about what to say...]
+//   [Meta about formatting/counting...]
+//   [The actual debate speech]
+//   [Maybe more meta-counting...]
+//   [Possibly a refined version]
+//
+// Strategy:
+//   1. Look for quoted final answers (model wraps them in quotes)
+//   2. Look for answer markers ("Thus final answer:", etc.)
+//   3. Split into sentences, reject meta-sentences, keep speech
+//   4. Prefer sentences from the END (where the actual answer lives)
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("- ")) {
-      bullets.push(trimmed);
-      continue;
-    }
-    // Match "Bullet N:" or "Bullet N." format — extract content after the label
-    const bulletMatch = trimmed.match(/^bullet\s*\d+\s*[:.]?\s*["""]?\s*(.+)/i);
-    if (bulletMatch && bulletMatch[1]) {
-      let content = bulletMatch[1].trim();
-      // Remove trailing quote if present
-      content = content.replace(/["""]$/, "").trim();
-      if (content) bullets.push(`- ${content}`);
-    }
+/** Words/phrases that indicate internal planning, not spoken debate */
+const META_SIGNALS = [
+  "must be", "need to", "we need", "let's ", "should cite", "should be",
+  "characters", "char count", "word count", "bullet point", "bullet ",
+  "markdown", "citation", "formatting", "sentence count", "numbered list",
+  "the user", "the instruction", "approximate", "response length",
+  "domain link", "counter red", "counter blue", "opening argument",
+  "present your", "incorporate", "web search", "search results",
+  "include citation", "argue for or against", "could cite", "could use",
+  "they want", "probably yes", "probably not", "probably need",
+  "let's craft", "let's count", "let's keep", "let's try", "let's make",
+  "thus final", "final answer", "final response", "final version",
+  "here is my", "here are my", "my response", "my answer", "my argument",
+  "keep under", "keep within", "under 400", "under 500", "that's ",
+  "use at most", "max 3", "max 4", "1-3-4", "3-4 bullet",
+  "punchy sentence", "directly counter", "be respectful", "be rigorous",
+  "output only", "spoken words", "start directly", "not aggressive",
+  "use conversational", "frontiersin", "wiley.com", "psychiatryonline",
+  "wikipedia", "deliver your verdict", "who won", "be decisive",
+  "[blue]", "[red]", "blue debater", "red debater", "blue's", "red's",
+  "so maybe", "actually we", "actually they", "link with", "domain is",
+  "total char", "how many char", "how many word", "now deliver",
+  "but they want", "that domain", "that is okay", "that likely",
+  "that suggests", "can also", "we can", "we should",
+  "documented in", "according to", "studies show", "research shows",
+  "the article", "the study", "published in", "as reported",
+  "check out", "refer to", "as noted in", "evidence from",
+  "data shows", "data suggests", "a study", "one study",
+  "researchers found", "researchers have", "the research",
+  "the evidence", "the data", "peer-reviewed", "meta-analysis",
+  "clinical trial", "randomized control", "literature review",
+  "journal of", "university of", "institute of",
+  "no sources", "without sources", "missing sources",
+  "i don't have", "i cannot verify", "i can't verify",
+];
+
+function isMetaSentence(s: string): boolean {
+  const lower = s.toLowerCase();
+  if (lower.length < 15) return true; // too short to be real speech
+  return META_SIGNALS.some((kw) => lower.includes(kw));
+}
+
+/** Try to extract a quoted final answer from the model output */
+function tryExtractQuoted(text: string): string | null {
+  // Look for text after "Let's craft:" or "Thus final answer:" in quotes
+  const markerQuoteRe =
+    /(?:let's craft|thus final answer|final answer|final version)[:\s]*"([^"]{20,})"/gi;
+  const matches = [...text.matchAll(markerQuoteRe)];
+  if (matches.length > 0) {
+    return matches[matches.length - 1][1]; // take the last one
   }
 
-  if (bullets.length > 0) {
-    return bullets.join("\n").trim();
+  // Look for text after answer markers (not in quotes)
+  const markerRe =
+    /(?:thus final answer|final answer|final version|final response)[:\s]*([\s\S]{20,})/i;
+  const markerMatch = text.match(markerRe);
+  if (markerMatch) {
+    // Take everything after the marker, up to the next meta section
+    const afterMarker = markerMatch[1].trim();
+    // Split into sentences and take clean ones
+    const sentences = afterMarker.match(/[^.!?]+[.!?]+/g) || [];
+    const clean = sentences.filter((s) => !isMetaSentence(s.trim()));
+    if (clean.length > 0) return clean.join(" ").trim();
   }
+
   return null;
 }
 
-/** Strip obvious chain-of-thought meta-commentary */
-function stripChainOfThought(text: string): string {
-  const lines = text.split("\n");
-  const cleaned: string[] = [];
+/** Extract the spoken line after a speaker prefix (e.g. "Moderator:", "Blue:", "Red:") */
+function extractPrefixedLine(rawText: string, prefix: string): string | null {
+  // Find ALL occurrences of the prefix, take the LAST one (most refined)
+  const re = new RegExp(`${prefix}:\\s*`, "gi");
+  let lastIndex = -1;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(rawText)) !== null) {
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex === -1) return null;
 
-  // Only strip lines that are clearly internal thinking, not debate content
-  const cotPatterns = [
-    /^we need to /i,
-    /^let's craft/i,
-    /^let's count/i,
-    /^need to keep under/i,
-    /^the user wants/i,
-    /^the instruction/i,
-    /^thus final answer/i,
-    /^could cite/i,
-    /^use markdown/i,
-    /^use at most/i,
-    /^that's \d+ sentence/i,
-    /^that domain is/i,
-    /approximate characters/i,
-    /^use citations/i,
-    /^include citation/i,
-    /^should cite/i,
-    /^must be brief/i,
-  ];
+  // Take everything after the prefix until end or next speaker prefix
+  const afterPrefix = rawText.slice(lastIndex);
+  const nextSpeaker = afterPrefix.search(/\n\s*(?:Moderator|Blue|Red):/i);
+  const spoken = nextSpeaker > 0 ? afterPrefix.slice(0, nextSpeaker) : afterPrefix;
+  const cleaned = spoken.trim();
+  return cleaned.length > 10 ? cleaned : null;
+}
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      cleaned.push(line);
-      continue;
+/** Extract actual debate speech from raw model output */
+function extractSpeech(rawText: string, maxLen: number, speaker: string): string {
+  const noUrls = stripUrls(rawText);
+
+  // Strategy 0: prefix extraction (strongest — model told to use "Speaker: ...")
+  const prefixed = extractPrefixedLine(noUrls, speaker);
+  if (prefixed) {
+    const cleaned = stripFormatting(prefixed);
+    return cleaned.length > maxLen ? cleaned.slice(0, maxLen) : cleaned;
+  }
+
+  // Strategy 1: quoted/marked final answer
+  const quoted = tryExtractQuoted(noUrls);
+  if (quoted) {
+    const cleaned = stripFormatting(quoted);
+    return cleaned.length > maxLen ? cleaned.slice(0, maxLen) : cleaned;
+  }
+
+  // Strategy 2: sentence-level filtering
+  const flat = stripFormatting(noUrls);
+  const sentences = flat.match(/[^.!?]+[.!?]+/g) || [flat];
+  const cleanSentences = sentences
+    .map((s) => s.trim())
+    .filter((s) => s.length > 15)
+    .filter((s) => !isMetaSentence(s));
+
+  if (cleanSentences.length > 0) {
+    let result = "";
+    for (let i = cleanSentences.length - 1; i >= 0; i--) {
+      const candidate = cleanSentences[i] + (result ? " " + result : "");
+      if (candidate.length > maxLen && result) break;
+      result = candidate;
     }
-    const isCot = cotPatterns.some((p) => p.test(trimmed));
-    if (!isCot) {
-      cleaned.push(line);
-    }
+    if (result.trim().length > 20) return result.trim();
   }
 
-  return cleaned.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-}
-
-/** Extract the last paragraphs that fit within a character limit */
-function extractLastParagraphs(text: string, maxLen: number): string {
-  const paragraphs = text.split(/\n\n+/).map((p) => p.trim()).filter((p) => p.length > 5);
-  if (paragraphs.length === 0) return text.slice(-maxLen);
-
-  let result = "";
-  for (let i = paragraphs.length - 1; i >= 0; i--) {
-    const candidate = paragraphs[i] + (result ? "\n\n" + result : "");
-    if (candidate.length > maxLen && result) break;
-    result = candidate;
+  // Strategy 3: last paragraph fallback
+  const paragraphs = noUrls
+    .split(/\n\n+/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 20);
+  if (paragraphs.length > 0) {
+    const last = stripFormatting(paragraphs[paragraphs.length - 1]);
+    return last.length > maxLen ? last.slice(0, maxLen) : last;
   }
-  return result || paragraphs[paragraphs.length - 1].slice(0, maxLen);
+
+  return flat.slice(-maxLen).trim();
 }
 
-/** Clean debate content: try bullet extraction first, then CoT filter, always fallback */
-function cleanDebateContent(text: string): string {
-  const stripped = stripUrlsFromText(text);
-  // For debaters: try extracting just the bullet points
-  const bullets = extractBulletPoints(stripped);
-  if (bullets) {
-    // Keep at most 4 bullet points (as per system prompt)
-    return bullets.split("\n").slice(0, 4).join("\n");
+/** Convert bullet/dash/numbered formatting to prose */
+function stripFormatting(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      let t = line.trim();
+      t = t.replace(/^[-*•]\s+/, "").replace(/^\d+\.\s+/, "");
+      return t;
+    })
+    .filter((l) => l.length > 1)
+    .join(" ")
+    .replace(/  +/g, " ")
+    .trim();
+}
+
+/** Strip markdown, em dashes, and ensure text ends on a complete sentence */
+function finalize(text: string): string {
+  let result = text;
+  // Strip markdown bold/italic
+  result = result.replace(/\*\*([^*]+)\*\*/g, "$1"); // **bold**
+  result = result.replace(/\*([^*]+)\*/g, "$1");       // *italic*
+  result = result.replace(/__([^_]+)__/g, "$1");       // __bold__
+  result = result.replace(/_([^_]+)_/g, "$1");          // _italic_
+  result = result.replace(/#{1,6}\s+/g, "");            // # headings
+  // Strip em dashes
+  result = result.replace(/\u2014/g, ", ").replace(/\u2013/g, ", ");
+  // Collapse double commas/spaces from replacement
+  result = result.replace(/,\s*,/g, ",").replace(/  +/g, " ").trim();
+  // Ensure it ends on a complete sentence
+  const lastEnd = Math.max(
+    result.lastIndexOf("."),
+    result.lastIndexOf("!"),
+    result.lastIndexOf("?")
+  );
+  if (lastEnd > 20) {
+    result = result.slice(0, lastEnd + 1);
   }
-  // Fallback: strip CoT patterns
-  const cotCleaned = stripChainOfThought(stripped);
-  let result = cotCleaned;
-  if (!result.trim() && stripped.trim()) result = stripped;
-  // Length limit: take last meaningful paragraphs
-  if (result.length > 400) result = extractLastParagraphs(result, 400);
-  return result;
+  return result.trim();
 }
 
-/** Clean moderator content: CoT filter + length limit */
+/** Clean debate content: extract speech, enforce length, finalize */
+function cleanDebateContent(text: string, speaker: "blue" | "red"): string {
+  const prefix = speaker === "blue" ? "Blue" : "Red";
+  return finalize(extractSpeech(text, 400, prefix));
+}
+
+/** Clean moderator content: extract speech, enforce length, finalize */
 function cleanModeratorContent(text: string): string {
-  const stripped = stripUrlsFromText(text);
-  const cotCleaned = stripChainOfThought(stripped);
-  let result = cotCleaned;
-  if (!result.trim() && stripped.trim()) result = stripped;
-  // Length limit: take last meaningful paragraphs
-  if (result.length > 500) result = extractLastParagraphs(result, 500);
-  return result;
+  return finalize(extractSpeech(text, 500, "Moderator"));
 }
 
 function sleep(ms: number) {
@@ -415,24 +492,21 @@ export async function POST(request: NextRequest) {
             sources: redResearch.map((r) => r.url),
           });
 
-          // Build research context strings for LLM prompts
-          const blueResearchContext = blueResearch.length > 0
-            ? `\n\nResearch sources (use these to support your argument):\n${blueResearch.map((r) => `- ${r.title}: ${r.snippet} (${r.url})`).join("\n")}`
-            : "";
-
-          const redResearchContext = redResearch.length > 0
-            ? `\n\nResearch sources (use these to support your argument):\n${redResearch.map((r) => `- ${r.title}: ${r.snippet} (${r.url})`).join("\n")}`
-            : "";
+          // ── COIN TOSS (speaking order) ─────────────────────
+          const blueFirst = Math.random() < 0.5;
+          const coinResult = blueFirst ? "Heads" : "Tails";
+          const firstSpeaker = blueFirst ? "Blue" : "Red";
+          console.log(`[debate-mode] coin toss: ${coinResult} → ${firstSpeaker} speaks first`);
 
           // ── MODERATOR INTRO ─────────────────────────────────
           console.log("[debate-mode] moderator-intro: start");
           send({ speaker: "moderator", type: "start" });
 
           const modIntroMessages: ChatMessage[] = [
-            { role: "system", content: MODERATOR_SYSTEM },
+            { role: "system", content: MODERATOR_INTRO_SYSTEM },
             {
               role: "user",
-              content: `Present the following debate topic and invite both sides to argue. Be brief (1-2 sentences):\n\n"${question}"`,
+              content: `The debate topic is: "${question}"\n\nBlue argues FOR. Red argues AGAINST.\n\nCoin toss result: ${coinResult}. ${firstSpeaker} speaks first.`,
             },
           ];
 
@@ -453,82 +527,58 @@ export async function POST(request: NextRequest) {
           debateHistory.push({ speaker: "moderator", content: cleanedModIntro });
 
           // ── DEBATE ROUNDS ───────────────────────────────────
+          // Order determined by coin toss
+          const order: ("blue" | "red")[] = blueFirst
+            ? ["blue", "red"]
+            : ["red", "blue"];
+
           for (let round = 0; round < clampedRounds; round++) {
             if (isClosed) break;
 
-            // ── BLUE TURN ──
-            const blueLabel = `blue-r${round + 1}`;
-            console.log(`[debate-mode] ${blueLabel}: start`);
-            send({ speaker: "blue", type: "start", round: round + 1 });
-
-            const blueContext = debateHistory
-              .map((h) => `[${h.speaker.toUpperCase()}]: ${h.content}`)
-              .join("\n\n");
-
-            const blueMessages: ChatMessage[] = [
-              { role: "system", content: BLUE_SYSTEM },
-              {
-                role: "user",
-                content:
-                  round === 0
-                    ? `Debate topic: "${question}"\n\nModerator said: ${cleanedModIntro}\n\nPresent your opening argument FOR this proposition.${blueResearchContext}`
-                    : `Debate topic: "${question}"\n\nPrevious discussion:\n${blueContext}\n\nRespond to the Red debater's latest points and strengthen your position.${blueResearchContext}`,
-              },
-            ];
-
-            let blueContent = "";
-
-            for await (const chunk of streamFromOpenRouter(blueMessages, blueLabel)) {
+            for (const speaker of order) {
               if (isClosed) break;
-              if (chunk.type === "content" && chunk.text) {
-                blueContent += chunk.text;
+
+              const isFor = speaker === "blue";
+              const opponent = isFor ? "Red" : "Blue";
+              const label = `${speaker}-r${round + 1}`;
+              console.log(`[debate-mode] ${label}: start`);
+              send({ speaker, type: "start", round: round + 1 });
+
+              const context = debateHistory
+                .map((h) => `[${h.speaker.toUpperCase()}]: ${h.content}`)
+                .join("\n\n");
+
+              const lastOpponentMsg = debateHistory
+                .filter((h) => h.speaker !== speaker && h.speaker !== "moderator")
+                .pop();
+
+              const messages: ChatMessage[] = [
+                { role: "system", content: DEBATER_SYSTEM(isFor ? "FOR" : "AGAINST") },
+                {
+                  role: "user",
+                  content:
+                    round === 0 && !lastOpponentMsg
+                      ? `Topic: "${question}"\n\nThe moderator said: ${cleanedModIntro}\n\nMake your case.`
+                      : round === 0 && lastOpponentMsg
+                      ? `Topic: "${question}"\n\n${opponent} just said: ${lastOpponentMsg.content}\n\nPush back on that.`
+                      : `Topic: "${question}"\n\nSo far:\n${context}\n\nYour turn. Respond to what ${opponent} just said.`,
+                },
+              ];
+
+              let turnContent = "";
+
+              for await (const chunk of streamFromOpenRouter(messages, label)) {
+                if (isClosed) break;
+                if (chunk.type === "content" && chunk.text) {
+                  turnContent += chunk.text;
+                }
               }
+
+              const cleaned = cleanDebateContent(turnContent, speaker);
+              console.log(`[debate-mode] ${label}: done (${cleaned.length} chars)`);
+              send({ speaker, type: "done", content: cleaned });
+              debateHistory.push({ speaker, content: cleaned });
             }
-
-            const cleanedBlue = cleanDebateContent(blueContent);
-            console.log(
-              `[debate-mode] ${blueLabel}: done (${cleanedBlue.length} chars)`
-            );
-            send({ speaker: "blue", type: "done", content: cleanedBlue });
-            debateHistory.push({ speaker: "blue", content: cleanedBlue });
-
-            if (isClosed) break;
-
-            // ── RED TURN ──
-            const redLabel = `red-r${round + 1}`;
-            console.log(`[debate-mode] ${redLabel}: start`);
-            send({ speaker: "red", type: "start", round: round + 1 });
-
-            const redContext = debateHistory
-              .map((h) => `[${h.speaker.toUpperCase()}]: ${h.content}`)
-              .join("\n\n");
-
-            const redMessages: ChatMessage[] = [
-              { role: "system", content: RED_SYSTEM },
-              {
-                role: "user",
-                content:
-                  round === 0
-                    ? `Debate topic: "${question}"\n\nThe Blue debater argued:\n${cleanedBlue}\n\nPresent your opening argument AGAINST this proposition and counter the Blue debater.${redResearchContext}`
-                    : `Debate topic: "${question}"\n\nPrevious discussion:\n${redContext}\n\nCounter the Blue debater's latest points and strengthen your position.${redResearchContext}`,
-              },
-            ];
-
-            let redContent = "";
-
-            for await (const chunk of streamFromOpenRouter(redMessages, redLabel)) {
-              if (isClosed) break;
-              if (chunk.type === "content" && chunk.text) {
-                redContent += chunk.text;
-              }
-            }
-
-            const cleanedRed = cleanDebateContent(redContent);
-            console.log(
-              `[debate-mode] ${redLabel}: done (${cleanedRed.length} chars)`
-            );
-            send({ speaker: "red", type: "done", content: cleanedRed });
-            debateHistory.push({ speaker: "red", content: cleanedRed });
           }
 
           if (isClosed) { safeClose(); return; }
@@ -545,7 +595,7 @@ export async function POST(request: NextRequest) {
             { role: "system", content: MODERATOR_SYSTEM },
             {
               role: "user",
-              content: `Debate topic: "${question}"\n\nFull debate:\n${fullDebateContext}\n\nNow deliver your verdict. Who won this debate and why? Or did they reach agreement? Be decisive.`,
+              content: `Topic: "${question}"\n\nThe debate:\n${fullDebateContext}\n\nWho won and why?`,
             },
           ];
 

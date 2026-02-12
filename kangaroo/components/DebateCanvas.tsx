@@ -1,14 +1,15 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import Image from "next/image";
+
+// ── Types ────────────────────────────────────────────────────────────
 
 interface DebateMessage {
   id: string;
   speaker: "moderator" | "blue" | "red";
   content: string;
   displayedContent: string;
-  isStreaming?: boolean;
   isVerdict?: boolean;
   round?: number;
 }
@@ -20,36 +21,26 @@ interface DebateCanvasProps {
   onBack?: () => void;
 }
 
-interface SavedDebate {
-  question: string;
-  messages: DebateMessage[];
-  researchSources: { blue: string[]; red: string[] };
-  isComplete: boolean;
-  savedAt: number;
-}
+type Phase = "loading" | "presenting" | "complete";
 
-const CHARS_PER_FRAME = 2;
-const FRAME_DELAY = 35; // ms between frames (~57 chars/sec)
-const STORAGE_KEY = "kangaroo-debate-log";
+// ── Constants ────────────────────────────────────────────────────────
 
-const formatSourceLabel = (url: string): string => {
-  try {
-    const parsed = new URL(url);
-    return parsed.hostname.replace(/^www\./, "");
-  } catch {
-    return url;
-  }
-};
+const CHARS_PER_FRAME = 1;
+const FRAME_DELAY = 45; // ms between frames (~22 chars/sec, deliberate pacing)
+const TURN_DELAY = 3000; // ms pause between blue/red turns
+const MOD_TO_AGENT_DELAY = 3000; // ms pause after moderator
+
+// ── SSE Parser ───────────────────────────────────────────────────────
 
 const parseSseEvents = (buffer: string) => {
   const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const events: { data: string; event?: string }[] = [];
   let remaining = normalized;
 
-  let delimiterIndex = remaining.indexOf("\n\n");
-  while (delimiterIndex !== -1) {
-    const rawEvent = remaining.slice(0, delimiterIndex);
-    remaining = remaining.slice(delimiterIndex + 2);
+  let idx = remaining.indexOf("\n\n");
+  while (idx !== -1) {
+    const rawEvent = remaining.slice(0, idx);
+    remaining = remaining.slice(idx + 2);
 
     if (rawEvent.trim()) {
       const lines = rawEvent.split("\n");
@@ -69,11 +60,13 @@ const parseSseEvents = (buffer: string) => {
       }
     }
 
-    delimiterIndex = remaining.indexOf("\n\n");
+    idx = remaining.indexOf("\n\n");
   }
 
   return { events, remaining };
 };
+
+// ── Component ────────────────────────────────────────────────────────
 
 export default function DebateCanvas({
   question,
@@ -81,180 +74,54 @@ export default function DebateCanvas({
   onComplete,
   onBack,
 }: DebateCanvasProps) {
+  // ── State ──
+  const [phase, setPhase] = useState<Phase>("loading");
   const [messages, setMessages] = useState<DebateMessage[]>([]);
-  const [isDebating, setIsDebating] = useState(false);
-  const [isComplete, setIsComplete] = useState(false);
-  const [isResearching, setIsResearching] = useState(false);
+  const [loadingLabel, setLoadingLabel] = useState("Preparing debate...");
+  const [loadingProgress, setLoadingProgress] = useState(0);
   const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
-  const [researchSources, setResearchSources] = useState<{ blue: string[]; red: string[] }>({ blue: [], red: [] });
+  const [logExpanded, setLogExpanded] = useState(false);
+  const [researchSources, setResearchSources] = useState<{
+    blue: string[];
+    red: string[];
+  }>({ blue: [], red: [] });
 
-  const logContainerRef = useRef<HTMLDivElement>(null);
+  // ── Refs ──
+  const preloadedRef = useRef<DebateMessage[]>([]);
+  const nextIndexRef = useRef(0);
+  const waitingRef = useRef(false);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const phaseRef = useRef<Phase>("loading");
   const rafRef = useRef<number | null>(null);
   const lastTickRef = useRef(0);
-  const hasStartedRef = useRef(false);
-
-  // ── Save to localStorage whenever messages or sources change ──
-  const saveToStorage = useCallback(() => {
-    try {
-      const data: SavedDebate = {
-        question,
-        messages: messages.map((m) => ({ ...m, displayedContent: m.content, isStreaming: false })),
-        researchSources,
-        isComplete,
-        savedAt: Date.now(),
-      };
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    } catch {
-      // Storage full or unavailable
-    }
-  }, [question, messages, researchSources, isComplete]);
+  const startedRef = useRef(false);
+  const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (messages.length > 0) {
-      saveToStorage();
-    }
-  }, [messages, saveToStorage]);
+    phaseRef.current = phase;
+  }, [phase]);
 
-  // ── Load from localStorage on mount ──
+  // ── PRELOAD DEBATE ─────────────────────────────────────────────────
+
   useEffect(() => {
-    if (hasStartedRef.current) return;
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const data: SavedDebate = JSON.parse(stored);
-        // Only restore if same question and less than 1 hour old
-        if (data.question === question && Date.now() - data.savedAt < 3600000) {
-          setMessages(data.messages);
-          setResearchSources(data.researchSources);
-          if (data.isComplete) {
-            setIsComplete(true);
-            hasStartedRef.current = true;
-            return;
-          }
-        }
-      }
-    } catch {
-      // Invalid stored data
-    }
-  }, [question]);
-
-  const updateMessage = (
-    speaker: DebateMessage["speaker"],
-    updater: (message: DebateMessage) => DebateMessage,
-    fallback?: Partial<DebateMessage>
-  ) => {
-    setMessages((prev) => {
-      const updated = [...prev];
-      let index = -1;
-
-      for (let i = updated.length - 1; i >= 0; i--) {
-        if (updated[i].speaker === speaker) {
-          index = i;
-          break;
-        }
-      }
-
-      if (index === -1) {
-        updated.push({
-          id: `${speaker}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          speaker,
-          content: "",
-          displayedContent: "",
-          isStreaming: true,
-          isVerdict: false,
-          round: undefined,
-          ...fallback,
-        });
-        index = updated.length - 1;
-      }
-
-      updated[index] = updater(updated[index]);
-      return updated;
-    });
-  };
-
-  // ── Typewriter: runs every frame, reveals chars one at a time ──
-  useEffect(() => {
-    let running = true;
-
-    const tick = (timestamp: number) => {
-      if (!running) return;
-
-      if (timestamp - lastTickRef.current >= FRAME_DELAY) {
-        lastTickRef.current = timestamp;
-
-        setMessages((prev) => {
-          let needsUpdate = false;
-          for (const msg of prev) {
-            if (msg.displayedContent.length < msg.content.length) {
-              needsUpdate = true;
-              break;
-            }
-          }
-
-          if (!needsUpdate) return prev;
-
-          const updated = [...prev];
-          for (let i = 0; i < updated.length; i++) {
-            const msg = updated[i];
-            if (msg.displayedContent.length < msg.content.length) {
-              const newLen = Math.min(
-                msg.displayedContent.length + CHARS_PER_FRAME,
-                msg.content.length
-              );
-              updated[i] = {
-                ...msg,
-                displayedContent: msg.content.slice(0, newLen),
-              };
-              break;
-            }
-          }
-          return updated;
-        });
-      }
-
-      rafRef.current = requestAnimationFrame(tick);
-    };
-
-    rafRef.current = requestAnimationFrame(tick);
-
-    return () => {
-      running = false;
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
-  }, []);
-
-  // ── Auto-scroll debate log ──
-  useEffect(() => {
-    if (logContainerRef.current) {
-      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
-    }
-  });
-
-  // ── Start debate on mount ──
-  useEffect(() => {
-    if (hasStartedRef.current) return;
-    hasStartedRef.current = true;
-    startDebate();
+    if (startedRef.current) return;
+    startedRef.current = true;
+    preloadDebate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const startDebate = async () => {
-    setIsDebating(true);
-    setMessages([]);
-    setResearchSources({ blue: [], red: [] });
-    setIsComplete(false);
-    try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
-
-    const abortController = new AbortController();
-    const timeoutId = setTimeout(() => abortController.abort(), 600000);
+  const preloadDebate = async () => {
+    setPhase("loading");
+    const collected: DebateMessage[] = [];
+    // 2 research-done + moderator + rounds*2 + verdict
+    const totalSteps = 4 + rounds * 2;
+    let step = 0;
 
     try {
       const response = await fetch("/api/debate-mode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question, rounds }),
-        signal: abortController.signal,
       });
 
       if (!response.ok) throw new Error(`API error: ${response.status}`);
@@ -280,142 +147,220 @@ export default function DebateCanvas({
           try {
             const data = JSON.parse(raw);
 
-            // ── Research phase events ──
             if (data.type === "research-start") {
-              setIsResearching(true);
+              setLoadingLabel("Researching topic...");
               continue;
             }
 
             if (data.type === "research-done") {
               const speaker = data.speaker as "blue" | "red";
-              const sources = Array.isArray(data.sources) ? data.sources : [];
-              setResearchSources((prev) => ({ ...prev, [speaker]: sources }));
-              // Check if both sides done
-              if (speaker === "red") {
-                setIsResearching(false);
-              }
+              const sources = Array.isArray(data.sources)
+                ? data.sources
+                : [];
+              setResearchSources((prev) => ({
+                ...prev,
+                [speaker]: sources,
+              }));
+              step++;
+              setLoadingProgress((step / totalSteps) * 100);
               continue;
             }
-
-            if (data.type === "complete") {
-              setIsComplete(true);
-              setActiveSpeaker(null);
-              onComplete?.();
-              continue;
-            }
-
-            if (data.type === "error") {
-              console.error("Debate error:", data.message);
-              continue;
-            }
-
-            const speaker = data.speaker as "moderator" | "blue" | "red";
-            const fallback: Partial<DebateMessage> = {};
-            if (typeof data.round === "number") fallback.round = data.round;
-            if (typeof data.isVerdict === "boolean") fallback.isVerdict = data.isVerdict;
 
             if (data.type === "start") {
-              setActiveSpeaker(speaker);
-              setMessages((prev) => [
-                ...prev,
-                {
-                  id: `${speaker}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                  speaker,
-                  content: "",
-                  displayedContent: "",
-                  isStreaming: true,
-                  isVerdict: data.isVerdict || false,
-                  round: data.round,
-                },
-              ]);
-            } else if (data.type === "content") {
-              updateMessage(
-                speaker,
-                (last) => {
-                  const nextContent =
-                    typeof data.content === "string" ? data.content : last.content;
-                  let nextDisplayed = last.displayedContent;
-                  if (!nextDisplayed && nextContent) {
-                    const initialLen = Math.min(CHARS_PER_FRAME, nextContent.length);
-                    nextDisplayed = nextContent.slice(0, initialLen);
-                  }
-                  return {
-                    ...last,
-                    content: nextContent,
-                    displayedContent: nextDisplayed,
-                    isVerdict:
-                      typeof data.isVerdict === "boolean" ? data.isVerdict : last.isVerdict,
-                    round: typeof data.round === "number" ? data.round : last.round,
-                    isStreaming: true,
-                  };
-                },
-                fallback
-              );
-            } else if (data.type === "done") {
-              updateMessage(
-                speaker,
-                (last) => {
-                  const finalContent =
-                    typeof data.content === "string" ? data.content : last.content;
-                  return {
-                    ...last,
-                    content: finalContent,
-                    isStreaming: false,
-                    isVerdict:
-                      typeof data.isVerdict === "boolean" ? data.isVerdict : last.isVerdict,
-                    round: typeof data.round === "number" ? data.round : last.round,
-                  };
-                },
-                fallback
-              );
-              setActiveSpeaker(null);
+              const labels: Record<string, string> = {
+                moderator: data.isVerdict
+                  ? "Moderator deliberating..."
+                  : "Moderator preparing...",
+                blue: `Blue preparing${
+                  data.round ? ` round ${data.round}` : ""
+                }...`,
+                red: `Red preparing${
+                  data.round ? ` round ${data.round}` : ""
+                }...`,
+              };
+              setLoadingLabel(labels[data.speaker] || "Preparing...");
+              continue;
             }
-          } catch {
-            // Skip invalid JSON
-          }
-        }
-      }
 
-      if (buffer.trim()) {
-        const finalParsed = parseSseEvents(`${buffer}\n\n`);
-        for (const event of finalParsed.events) {
-          const raw = event.data.trim();
-          if (!raw) continue;
-          try {
-            const data = JSON.parse(raw);
-            if (data.type === "complete") {
-              setIsComplete(true);
-              setActiveSpeaker(null);
-              onComplete?.();
+            if (data.type === "done") {
+              collected.push({
+                id: `${data.speaker}-${Date.now()}-${Math.random()
+                  .toString(36)
+                  .slice(2, 6)}`,
+                speaker: data.speaker,
+                content: data.content || "",
+                displayedContent: "",
+                isVerdict: data.isVerdict || false,
+                round: data.round,
+              });
+              step++;
+              setLoadingProgress((step / totalSteps) * 100);
+              continue;
             }
+
+            if (data.type === "complete") break;
+            if (data.type === "error")
+              console.error("Debate error:", data.message);
           } catch {
-            // Skip invalid JSON
+            /* skip invalid JSON */
           }
         }
       }
     } catch (error) {
-      console.error("Debate stream error:", error);
-    } finally {
-      clearTimeout(timeoutId);
-      setIsDebating(false);
+      console.error("Debate preload error:", error);
+    }
+
+    preloadedRef.current = collected;
+    nextIndexRef.current = 0;
+    waitingRef.current = false;
+    setLoadingProgress(100);
+
+    // Small pause before starting presentation
+    setTimeout(() => setPhase("presenting"), 400);
+  };
+
+  // ── TYPEWRITER ─────────────────────────────────────────────────────
+
+  useEffect(() => {
+    let running = true;
+
+    const tick = (timestamp: number) => {
+      if (!running) return;
+
+      if (timestamp - lastTickRef.current >= FRAME_DELAY) {
+        lastTickRef.current = timestamp;
+
+        setMessages((prev) => {
+          for (let i = 0; i < prev.length; i++) {
+            const msg = prev[i];
+            if (msg.displayedContent.length < msg.content.length) {
+              const newLen = Math.min(
+                msg.displayedContent.length + CHARS_PER_FRAME,
+                msg.content.length
+              );
+              const updated = [...prev];
+              updated[i] = {
+                ...msg,
+                displayedContent: msg.content.slice(0, newLen),
+              };
+              return updated;
+            }
+          }
+          return prev;
+        });
+      }
+
+      rafRef.current = requestAnimationFrame(tick);
+    };
+
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      running = false;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
+
+  // ── REVEAL TIMER ───────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (phase !== "presenting") return;
+    if (waitingRef.current) return;
+
+    const preloaded = preloadedRef.current;
+    const nextIdx = nextIndexRef.current;
+
+    // All revealed — check if typing finished
+    if (nextIdx >= preloaded.length) {
+      const allTyped = messages.every(
+        (m) => m.displayedContent.length >= m.content.length
+      );
+      if (allTyped && messages.length > 0) {
+        setPhase("complete");
+        setActiveSpeaker(null);
+        onComplete?.();
+      }
+      return;
+    }
+
+    // Wait for current message to finish typing
+    const lastMsg = messages[messages.length - 1];
+    const isDone =
+      !lastMsg || lastMsg.displayedContent.length >= lastMsg.content.length;
+    if (!isDone) return;
+
+    // Calculate delay
+    const delay =
+      messages.length === 0
+        ? 200
+        : lastMsg?.speaker === "moderator"
+        ? MOD_TO_AGENT_DELAY
+        : TURN_DELAY;
+
+    waitingRef.current = true;
+
+    timerRef.current = setTimeout(() => {
+      if (phaseRef.current !== "presenting") return;
+      const nextMsg = preloaded[nextIdx];
+      nextIndexRef.current++;
+      waitingRef.current = false;
+      setMessages((prev) => [...prev, { ...nextMsg, displayedContent: "" }]);
+      setActiveSpeaker(nextMsg.speaker);
+    }, delay);
+  }, [phase, messages, onComplete]);
+
+  // Clear active speaker when current message finishes typing
+  useEffect(() => {
+    if (!activeSpeaker) return;
+    const lastMsg = messages[messages.length - 1];
+    if (
+      lastMsg &&
+      lastMsg.displayedContent.length >= lastMsg.content.length
+    ) {
+      setActiveSpeaker(null);
+    }
+  }, [messages, activeSpeaker]);
+
+  // Auto-scroll log
+  useEffect(() => {
+    if (logRef.current && logExpanded) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  });
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  // ── HELPERS ────────────────────────────────────────────────────────
+
+  const isTyping = (msg: DebateMessage) =>
+    msg.displayedContent.length < msg.content.length;
+
+  const getLatest = (speaker: "moderator" | "blue" | "red") => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].speaker === speaker) return messages[i];
+    }
+    return null;
+  };
+
+  const latestBlue = getLatest("blue");
+  const latestRed = getLatest("red");
+  const latestMod = getLatest("moderator");
+
+  const domainLabel = (url: string) => {
+    try {
+      return new URL(url).hostname.replace(/^www\./, "");
+    } catch {
+      return url;
     }
   };
 
-  // ── Helpers ──
-  const isMsgTyping = (msg: DebateMessage) =>
-    msg.displayedContent.length < msg.content.length;
+  // ── SPEECH BUBBLE ──────────────────────────────────────────────────
 
-  const getLatestMessage = (speaker: "moderator" | "blue" | "red") => {
-    const speakerMessages = messages.filter((m) => m.speaker === speaker);
-    return speakerMessages.length > 0 ? speakerMessages[speakerMessages.length - 1] : null;
-  };
-
-  const latestBlue = getLatestMessage("blue");
-  const latestRed = getLatestMessage("red");
-  const latestModerator = getLatestMessage("moderator");
-
-  // ── Speech bubble above avatar ──
-  const renderSpeechBubble = (
+  const renderBubble = (
     msg: DebateMessage | null,
     speaker: "moderator" | "blue" | "red"
   ) => {
@@ -425,26 +370,49 @@ export default function DebateCanvas({
 
     if (!hasContent && !isActive) return null;
 
-    const styles = {
-      blue: { border: "border-blue-400", bg: "bg-blue-50/90", ring: "ring-blue-400", label: "text-blue-600", text: "text-blue-900", dot: "bg-blue-500", cls: "speech-bubble-blue" },
-      red: { border: "border-red-400", bg: "bg-red-50/90", ring: "ring-red-400", label: "text-red-600", text: "text-red-900", dot: "bg-red-500", cls: "speech-bubble-red" },
-      moderator: { border: "border-gray-400", bg: "bg-white/90", ring: "ring-gray-400", label: "text-gray-600", text: "text-gray-800", dot: "bg-gray-500", cls: "speech-bubble-mod" },
+    const palette = {
+      blue: {
+        border: "border-blue-200/80",
+        bg: "bg-gradient-to-br from-blue-50 to-white",
+        text: "text-blue-900",
+        dot: "bg-blue-500",
+      },
+      red: {
+        border: "border-red-200/80",
+        bg: "bg-gradient-to-br from-red-50 to-white",
+        text: "text-red-900",
+        dot: "bg-red-500",
+      },
+      moderator: {
+        border: "border-gray-200/80",
+        bg: "bg-gradient-to-br from-gray-50 to-white",
+        text: "text-gray-800",
+        dot: "bg-gray-500",
+      },
     };
-    const s = styles[speaker];
-    const preview = text.length > 100 ? "..." + text.slice(-100) : text;
+    const s = palette[speaker];
+    const preview = text.length > 140 ? "\u2026" + text.slice(-140) : text;
 
     return (
-      <div className={`${s.cls} relative mb-3 w-full rounded-2xl border-2 ${s.border} ${s.bg} backdrop-blur-sm px-4 py-3 shadow-lg ${isActive ? `ring-2 ${s.ring} ring-opacity-50 animate-pulse-subtle` : ""}`}>
+      <div
+        className={`relative w-full rounded-2xl border ${s.border} ${s.bg} backdrop-blur-sm px-5 py-4 shadow-lg mb-3 transition-all duration-300`}
+      >
         {isActive && !hasContent ? (
-          <div className={`flex items-center gap-2 ${s.label} text-sm font-medium`}>
-            <span className={`w-2 h-2 ${s.dot} rounded-full animate-pulse`} />
-            Thinking...
+          <div className="flex items-center gap-2 text-sm font-medium text-gray-400">
+            <span
+              className={`w-2 h-2 ${s.dot} rounded-full animate-pulse`}
+            />
+            Preparing response...
           </div>
         ) : (
-          <p className={`${s.text} text-base leading-relaxed whitespace-pre-wrap`}>
+          <p
+            className={`${s.text} text-[15px] leading-[1.75] whitespace-pre-wrap tracking-[-0.01em]`}
+          >
             {preview}
-            {msg && isMsgTyping(msg) && (
-              <span className={`inline-block w-1.5 h-4 ${s.dot} opacity-60 animate-pulse ml-0.5 align-middle`} />
+            {msg && isTyping(msg) && (
+              <span
+                className={`inline-block w-[2px] h-[17px] ${s.dot} opacity-60 animate-pulse ml-0.5 align-middle`}
+              />
             )}
           </p>
         )}
@@ -452,25 +420,31 @@ export default function DebateCanvas({
     );
   };
 
-  // ── Source icons beside avatar ──
-  const renderSourceIcons = (speaker: "blue" | "red", accentColor: string) => {
+  // ── SOURCE ICONS ───────────────────────────────────────────────────
+
+  const renderSources = (
+    speaker: "blue" | "red",
+    borderColor: string
+  ) => {
     const sources = researchSources[speaker];
     if (sources.length === 0) return null;
 
     return (
-      <div className="flex flex-col gap-1.5 mb-6">
-        <span className="text-[9px] font-bold uppercase tracking-wider text-gray-400 text-center">Sources</span>
+      <div className="flex flex-col gap-1.5 mt-3">
+        <span className="text-[8px] font-semibold uppercase tracking-widest text-gray-400 text-center">
+          Sources
+        </span>
         {sources.map((url, i) => (
           <a
             key={`${speaker}-src-${i}`}
             href={url}
             target="_blank"
             rel="noopener noreferrer"
-            title={formatSourceLabel(url)}
-            className={`group w-9 h-9 rounded-lg bg-white border-2 ${accentColor} flex items-center justify-center hover:scale-110 transition-all shadow-md`}
+            title={domainLabel(url)}
+            className={`group w-8 h-8 rounded-lg bg-white border ${borderColor} flex items-center justify-center hover:scale-110 transition-all shadow-sm`}
           >
-            <span className="text-xs font-bold text-gray-600 group-hover:text-gray-900">
-              {formatSourceLabel(url).charAt(0).toUpperCase()}
+            <span className="text-[10px] font-bold text-gray-500 group-hover:text-gray-800">
+              {domainLabel(url).charAt(0).toUpperCase()}
             </span>
           </a>
         ))}
@@ -478,160 +452,366 @@ export default function DebateCanvas({
     );
   };
 
-  const chatBubbleStyle = (speaker: string) => {
-    switch (speaker) {
-      case "blue": return "bg-blue-50 border-blue-200";
-      case "red": return "bg-red-50 border-red-200";
-      case "moderator": return "bg-gray-50 border-gray-200";
-      default: return "bg-white border-gray-200";
-    }
-  };
+  // ── LOADING VIEW ───────────────────────────────────────────────────
 
-  const speakerTag = (msg: DebateMessage) => {
-    const names: Record<string, string> = { blue: "Blue", red: "Red", moderator: "Moderator" };
-    const colors: Record<string, string> = { blue: "bg-blue-500 text-white", red: "bg-red-500 text-white", moderator: "bg-gray-600 text-white" };
-    let label = names[msg.speaker] || msg.speaker;
-    if (msg.round) label += ` - Round ${msg.round}`;
-    if (msg.isVerdict) label += " - VERDICT";
-
+  if (phase === "loading") {
     return (
-      <span className={`inline-flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-full ${colors[msg.speaker]}`}>
-        {label}
-        {isMsgTyping(msg) && <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse" />}
-      </span>
+      <div className="h-screen flex flex-col overflow-hidden bg-gradient-to-b from-[#f8f6f8] to-[#faf8f7]">
+        {/* Header */}
+        <header className="flex-shrink-0 flex items-center justify-between px-6 py-4">
+          <button
+            onClick={onBack}
+            className="flex items-center gap-2 text-gray-400 hover:text-gray-700 transition-colors text-sm"
+          >
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M15 19l-7-7 7-7"
+              />
+            </svg>
+            Back
+          </button>
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-[#76b900] flex items-center justify-center">
+              <span className="text-white font-bold text-xs">K</span>
+            </div>
+            <span className="font-semibold text-gray-800 text-sm">
+              Debate Arena
+            </span>
+          </div>
+          <div className="w-16" />
+        </header>
+
+        {/* Topic */}
+        <div className="px-6 py-2">
+          <div className="max-w-3xl mx-auto bg-white/70 backdrop-blur-sm rounded-full px-5 py-2.5 text-center text-sm text-gray-500 shadow-sm border border-gray-200/50">
+            <span className="font-medium text-gray-800">Topic:</span>{" "}
+            {question}
+          </div>
+        </div>
+
+        {/* Loading content */}
+        <main className="flex-1 flex flex-col items-center justify-center gap-10 px-6">
+          <div className="flex items-end gap-12">
+            <div className="opacity-25 grayscale">
+              <Image
+                src="/blue.png"
+                alt="Blue"
+                width={130}
+                height={195}
+                className="object-contain"
+                priority
+              />
+            </div>
+            <div className="opacity-25 grayscale">
+              <Image
+                src="/moderator.png"
+                alt="Moderator"
+                width={130}
+                height={195}
+                className="object-contain"
+                priority
+              />
+            </div>
+            <div className="opacity-25 grayscale">
+              <Image
+                src="/red.png"
+                alt="Red"
+                width={130}
+                height={195}
+                className="object-contain"
+                priority
+              />
+            </div>
+          </div>
+
+          <div className="flex flex-col items-center gap-3 w-full max-w-xs">
+            <div className="w-full h-1.5 bg-gray-200/80 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-[#76b900] rounded-full transition-all duration-700 ease-out"
+                style={{ width: `${loadingProgress}%` }}
+              />
+            </div>
+            <p className="text-sm text-gray-500 font-medium">
+              {loadingLabel}
+            </p>
+          </div>
+        </main>
+      </div>
     );
-  };
+  }
+
+  // ── DEBATE VIEW (presenting + complete) ────────────────────────────
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden">
+    <div className="min-h-screen flex flex-col bg-gradient-to-b from-[#f8f6f8] to-[#faf8f7]">
       {/* Header */}
-      <header className="flex-shrink-0 flex items-center justify-between px-6 py-4 bg-gradient-to-b from-[#f5f0f5] to-transparent z-50">
-        <button onClick={onBack} className="flex items-center gap-2 text-[#6b7280] hover:text-[#2d2d2d] transition-colors">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+      <header className="flex-shrink-0 flex items-center justify-between px-6 py-4">
+        <button
+          onClick={onBack}
+          className="flex items-center gap-2 text-gray-400 hover:text-gray-700 transition-colors text-sm"
+        >
+          <svg
+            className="w-4 h-4"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M15 19l-7-7 7-7"
+            />
           </svg>
           Back
         </button>
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-[#76b900] flex items-center justify-center">
-            <span className="text-white font-bold text-sm">K</span>
+          <div className="w-7 h-7 rounded-lg bg-[#76b900] flex items-center justify-center">
+            <span className="text-white font-bold text-xs">K</span>
           </div>
-          <span className="font-semibold text-[#2d2d2d]">Debate Arena</span>
+          <span className="font-semibold text-gray-800 text-sm">
+            Debate Arena
+          </span>
         </div>
-        <div className="text-xs text-[#6b7280] flex items-center gap-2">
-          {isResearching && (
-            <><span className="w-2 h-2 bg-purple-500 rounded-full animate-pulse" />Researching...</>
+        <div className="text-xs text-gray-400 flex items-center gap-2">
+          {phase === "presenting" && (
+            <>
+              <span className="w-2 h-2 bg-amber-500 rounded-full animate-pulse" />
+              Live
+            </>
           )}
-          {isDebating && !isComplete && !isResearching && (
-            <><span className="w-2 h-2 bg-amber-500 rounded-full animate-pulse" />Live</>
-          )}
-          {isComplete && (
-            <><span className="w-2 h-2 bg-green-500 rounded-full" />Complete</>
+          {phase === "complete" && (
+            <>
+              <span className="w-2 h-2 bg-green-500 rounded-full" />
+              Complete
+            </>
           )}
         </div>
       </header>
 
-      {/* Topic bar */}
-      <div className="flex-shrink-0 px-6 py-2 z-40">
-        <div className="max-w-5xl mx-auto bg-white/80 backdrop-blur-sm rounded-full px-5 py-2 text-center text-sm text-[#4b5563] shadow-sm border border-[#e5e7eb]">
-          <span className="font-medium text-[#2d2d2d]">Topic:</span> {question}
+      {/* Topic */}
+      <div className="flex-shrink-0 px-6 py-2">
+        <div className="max-w-3xl mx-auto bg-white/70 backdrop-blur-sm rounded-full px-5 py-2.5 text-center text-sm text-gray-500 shadow-sm border border-gray-200/50">
+          <span className="font-medium text-gray-800">Topic:</span>{" "}
+          {question}
         </div>
       </div>
 
       {/* Main content */}
-      <main className="flex-1 min-h-0 flex flex-col px-4 pb-4">
-        <div className="max-w-6xl mx-auto w-full flex-1 min-h-0 flex flex-col">
+      <main className="flex-1 flex flex-col px-4 pb-4">
+        <div className="max-w-6xl mx-auto w-full flex-1 flex flex-col">
           {/* Avatar stage */}
-          <div className="flex-shrink-0 relative flex items-end justify-between gap-4 px-4 mb-4" style={{ minHeight: "380px" }}>
+          <div
+            className="flex-shrink-0 relative flex items-end justify-between gap-4 px-4 mb-2"
+            style={{ minHeight: "360px" }}
+          >
             {/* Blue */}
-            <div className="flex flex-col items-center relative" style={{ width: "280px" }}>
-              {renderSpeechBubble(latestBlue, "blue")}
-              <div className="flex items-end gap-2">
-                <div className={`relative transition-all duration-300 ${activeSpeaker === "blue" ? "scale-105" : "opacity-80"}`}>
-                  <Image src="/blue.png" alt="Blue Debater" width={220} height={330} className="object-contain drop-shadow-lg" priority />
+            <div
+              className="flex flex-col items-center"
+              style={{ width: "280px" }}
+            >
+              {renderBubble(latestBlue, "blue")}
+              <div className="flex items-end gap-3">
+                <div
+                  className={`relative transition-all duration-500 ${
+                    activeSpeaker === "blue" ? "scale-105" : "opacity-70"
+                  }`}
+                >
+                  <Image
+                    src="/blue.png"
+                    alt="Blue Debater"
+                    width={200}
+                    height={300}
+                    className="object-contain drop-shadow-lg"
+                    priority
+                  />
                   {activeSpeaker === "blue" && (
-                    <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 bg-blue-500 text-white text-xs font-bold px-3 py-1 rounded-full shadow">Speaking...</div>
+                    <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 bg-blue-500 text-white text-[10px] font-bold px-3 py-0.5 rounded-full shadow-md">
+                      Speaking
+                    </div>
                   )}
                 </div>
-                {renderSourceIcons("blue", "border-blue-400")}
+                {renderSources("blue", "border-blue-200")}
               </div>
-              <span className="mt-2 text-sm font-bold text-blue-600">BLUE</span>
+              <span className="mt-2 text-[11px] font-bold text-blue-500 uppercase tracking-widest">
+                Blue
+              </span>
             </div>
 
             {/* Moderator */}
-            <div className="flex flex-col items-center relative" style={{ width: "280px" }}>
-              {renderSpeechBubble(latestModerator, "moderator")}
-              <div className={`relative transition-all duration-300 ${activeSpeaker === "moderator" ? "scale-105" : "opacity-80"}`}>
-                <Image src="/moderator.png" alt="Moderator" width={220} height={330} className="object-contain drop-shadow-lg" priority />
+            <div
+              className="flex flex-col items-center"
+              style={{ width: "280px" }}
+            >
+              {renderBubble(latestMod, "moderator")}
+              <div
+                className={`relative transition-all duration-500 ${
+                  activeSpeaker === "moderator" ? "scale-105" : "opacity-70"
+                }`}
+              >
+                <Image
+                  src="/moderator.png"
+                  alt="Moderator"
+                  width={200}
+                  height={300}
+                  className="object-contain drop-shadow-lg"
+                  priority
+                />
                 {activeSpeaker === "moderator" && (
-                  <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 bg-gray-700 text-white text-xs font-bold px-3 py-1 rounded-full shadow">Speaking...</div>
+                  <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 bg-gray-700 text-white text-[10px] font-bold px-3 py-0.5 rounded-full shadow-md">
+                    Speaking
+                  </div>
                 )}
               </div>
-              <span className="mt-2 text-sm font-bold text-gray-600">MODERATOR</span>
+              <span className="mt-2 text-[11px] font-bold text-gray-500 uppercase tracking-widest">
+                Moderator
+              </span>
             </div>
 
             {/* Red */}
-            <div className="flex flex-col items-center relative" style={{ width: "280px" }}>
-              {renderSpeechBubble(latestRed, "red")}
-              <div className="flex items-end gap-2">
-                {renderSourceIcons("red", "border-red-400")}
-                <div className={`relative transition-all duration-300 ${activeSpeaker === "red" ? "scale-105" : "opacity-80"}`}>
-                  <Image src="/red.png" alt="Red Debater" width={220} height={330} className="object-contain drop-shadow-lg" priority />
+            <div
+              className="flex flex-col items-center"
+              style={{ width: "280px" }}
+            >
+              {renderBubble(latestRed, "red")}
+              <div className="flex items-end gap-3">
+                {renderSources("red", "border-red-200")}
+                <div
+                  className={`relative transition-all duration-500 ${
+                    activeSpeaker === "red" ? "scale-105" : "opacity-70"
+                  }`}
+                >
+                  <Image
+                    src="/red.png"
+                    alt="Red Debater"
+                    width={200}
+                    height={300}
+                    className="object-contain drop-shadow-lg"
+                    priority
+                  />
                   {activeSpeaker === "red" && (
-                    <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 bg-red-500 text-white text-xs font-bold px-3 py-1 rounded-full shadow">Speaking...</div>
+                    <div className="absolute -bottom-1 left-1/2 -translate-x-1/2 bg-red-500 text-white text-[10px] font-bold px-3 py-0.5 rounded-full shadow-md">
+                      Speaking
+                    </div>
                   )}
                 </div>
               </div>
-              <span className="mt-2 text-sm font-bold text-red-600">RED</span>
+              <span className="mt-2 text-[11px] font-bold text-red-500 uppercase tracking-widest">
+                Red
+              </span>
             </div>
           </div>
 
-          {/* Debate log */}
-          <div className="flex-1 min-h-0 max-w-3xl mx-auto w-full flex flex-col">
-            <div className="flex items-center gap-2 mb-3 px-2 flex-shrink-0">
-              <div className="h-px flex-1 bg-[#e5e7eb]" />
-              <span className="text-xs font-medium text-[#6b7280] uppercase tracking-wider">Debate Log</span>
-              <div className="h-px flex-1 bg-[#e5e7eb]" />
-            </div>
-
-            <div className="flex-1 min-h-0 bg-white/60 backdrop-blur-sm rounded-2xl border border-[#e5e7eb] shadow-sm overflow-hidden">
-              <div ref={logContainerRef} className="h-full overflow-y-auto p-5 flex flex-col gap-4 debate-log-scroll">
-                {messages.length === 0 && !isResearching && (
-                  <div className="flex-1 flex items-center justify-center text-[#9ca3af] text-sm">Debate starting...</div>
+          {/* Debate Log (collapsible) */}
+          <div className="flex-shrink-0 max-w-3xl mx-auto w-full mt-2">
+            <button
+              onClick={() => setLogExpanded(!logExpanded)}
+              className="w-full flex items-center justify-center gap-2 py-2 text-sm font-medium text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              <div className="h-px flex-1 bg-gray-200/80" />
+              <div className="flex items-center gap-1.5 px-3">
+                <svg
+                  className={`w-3.5 h-3.5 transition-transform duration-200 ${
+                    logExpanded ? "rotate-180" : ""
+                  }`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M19 9l-7 7-7-7"
+                  />
+                </svg>
+                <span className="uppercase tracking-wider text-xs">
+                  Debate Log
+                </span>
+                {messages.length > 0 && (
+                  <span className="text-[10px] bg-gray-200/80 text-gray-500 px-1.5 py-0.5 rounded-full font-semibold">
+                    {messages.length}
+                  </span>
                 )}
+              </div>
+              <div className="h-px flex-1 bg-gray-200/80" />
+            </button>
 
-                {isResearching && messages.length === 0 && (
-                  <div className="flex-1 flex flex-col items-center justify-center gap-3">
-                    <div className="flex items-center gap-2 text-purple-600">
-                      <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                      </svg>
-                      <span className="text-sm font-medium">Gathering research sources...</span>
-                    </div>
-                    <p className="text-xs text-[#9ca3af]">Both sides are preparing their arguments</p>
+            <div
+              className={`overflow-hidden transition-all duration-300 ease-in-out ${
+                logExpanded
+                  ? "max-h-[400px] opacity-100 mt-2"
+                  : "max-h-0 opacity-0"
+              }`}
+            >
+              <div
+                ref={logRef}
+                className="max-h-[380px] overflow-y-auto bg-white/50 backdrop-blur-sm rounded-2xl border border-gray-200/50 shadow-sm p-5 flex flex-col gap-4"
+              >
+                {messages.length === 0 && (
+                  <div className="text-center text-gray-400 text-sm py-6">
+                    Waiting for debate to begin...
                   </div>
                 )}
 
                 {messages.map((msg) => {
                   const text = msg.displayedContent;
-                  const typing = isMsgTyping(msg);
+                  if (!text.trim()) return null;
 
-                  if (!text && !typing) return null;
+                  const tagColors: Record<string, string> = {
+                    blue: "bg-blue-500",
+                    red: "bg-red-500",
+                    moderator: "bg-gray-600",
+                  };
+                  const bubbleColors: Record<string, string> = {
+                    blue: "bg-blue-50/80 border-blue-100",
+                    red: "bg-red-50/80 border-red-100",
+                    moderator: "bg-gray-50/80 border-gray-100",
+                  };
+                  const names: Record<string, string> = {
+                    blue: "Blue",
+                    red: "Red",
+                    moderator: "Moderator",
+                  };
+
+                  let label = names[msg.speaker];
+                  if (msg.round) label += ` \u00b7 R${msg.round}`;
+                  if (msg.isVerdict) label += " \u00b7 Verdict";
 
                   return (
                     <div
                       key={msg.id}
-                      className={`flex flex-col gap-2 ${
-                        msg.speaker === "blue" ? "items-start" :
-                        msg.speaker === "red" ? "items-end" : "items-center"
+                      className={`flex flex-col gap-1.5 ${
+                        msg.speaker === "blue"
+                          ? "items-start"
+                          : msg.speaker === "red"
+                          ? "items-end"
+                          : "items-center"
                       }`}
                     >
-                      {speakerTag(msg)}
-                      <div className={`rounded-2xl border px-5 py-4 max-w-[85%] shadow-sm ${chatBubbleStyle(msg.speaker)} ${msg.isVerdict ? "ring-2 ring-amber-400" : ""}`}>
-                        <p className="text-base leading-relaxed whitespace-pre-wrap text-[#1f2937]">
+                      <span
+                        className={`text-[10px] font-semibold text-white px-2 py-0.5 rounded-full ${tagColors[msg.speaker]}`}
+                      >
+                        {label}
+                      </span>
+                      <div
+                        className={`rounded-xl border px-4 py-3 max-w-[85%] shadow-sm ${
+                          bubbleColors[msg.speaker]
+                        } ${msg.isVerdict ? "ring-1 ring-amber-300" : ""}`}
+                      >
+                        <p className="text-[13px] leading-[1.7] whitespace-pre-wrap text-gray-700">
                           {text}
-                          {typing && <span className="inline-block w-2 h-4 bg-[#6b7280] opacity-40 animate-pulse ml-0.5 align-middle rounded-sm" />}
+                          {isTyping(msg) && (
+                            <span className="inline-block w-[2px] h-[15px] bg-gray-400 opacity-40 animate-pulse ml-0.5 align-middle" />
+                          )}
                         </p>
                       </div>
                     </div>
