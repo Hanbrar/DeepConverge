@@ -1,14 +1,14 @@
 @import "tailwindcss";
 
 :root {
-  --background: #f5f0f5;
-  --background-end: #faf8f7;
+  --background: #fffaf3;
+  --background-end: #fffaf3;
   --foreground: #2d2d2d;
   --coral: #f08a7a;
   --coral-hover: #e87a6a;
   --charcoal: #2d2d2d;
   --muted: #6b7280;
-  --card: #ffffff;
+  --card: #fffaf2;
 }
 
 @theme inline {
@@ -31,7 +31,7 @@ body {
 
 /* Glassmorphism card */
 .glass-card {
-  background: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 250, 242, 0.92);
   backdrop-filter: blur(10px);
   border-radius: 16px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);

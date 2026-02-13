@@ -326,7 +326,7 @@ async function fetchWithRetry(
         Authorization: `Bearer ${OPENROUTER_API_KEY}`,
         "HTTP-Referer":
           process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
-        "X-Title": `Kangaroo AI Debate - ${label}`,
+        "X-Title": `DeepConverge Debate - ${label}`,
         "X-Request-Id": requestId,
       },
       body: JSON.stringify({

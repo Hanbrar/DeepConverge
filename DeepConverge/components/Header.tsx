@@ -5,9 +5,9 @@ export default function Header() {
     <header className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6 py-4">
       <div className="flex items-center gap-2">
         <div className="w-8 h-8 rounded-lg bg-[#76b900] flex items-center justify-center">
-          <span className="text-white font-bold text-sm">K</span>
+          <span className="text-white font-bold text-sm">DC</span>
         </div>
-        <span className="font-semibold text-charcoal">Kangaroo</span>
+        <span className="font-semibold text-charcoal">DeepConverge</span>
       </div>
       <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center">
         <svg

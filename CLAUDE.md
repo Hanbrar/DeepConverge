@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Kangaroo** - A multi-agent AI debate platform for the NVIDIA GTC 2026 Golden Ticket Contest.
+**DeepConverge** - A multi-agent AI debate platform for the NVIDIA GTC 2026 Golden Ticket Contest.
 
 Users ask questions and watch 3 AI agents (Advocate, Critic, Judge) debate in real-time to produce smarter answers.
 
@@ -17,7 +17,7 @@ Users ask questions and watch 3 AI agents (Advocate, Critic, Judge) debate in re
 ## Commands
 
 ```bash
-cd kangaroo
+cd DeepConverge
 npm run dev      # Start development server (localhost:3000)
 npm run build    # Production build
 npm run lint     # Run ESLint
@@ -26,7 +26,7 @@ npm run lint     # Run ESLint
 ## Project Structure
 
 ```
-kangaroo/
+DeepConverge/
 ├── app/
 │   ├── page.tsx              # Landing page with debate UI
 │   ├── layout.tsx            # Root layout with Inter font

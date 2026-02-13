@@ -44,7 +44,7 @@ export default function DebateInput({ onSubmit, isLoading }: DebateInputProps) {
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask Kangaroo anything... code, decisions, ideas"
+          placeholder="Ask DeepConverge anything... code, decisions, ideas"
           className="flex-1 bg-transparent outline-none text-charcoal placeholder-muted"
           disabled={isLoading}
         />

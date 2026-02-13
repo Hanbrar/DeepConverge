@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
         "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
-        "X-Title": "Kangaroo AI",
+        "X-Title": "DeepConverge AI",
       },
       body: JSON.stringify({
         model: MODEL,

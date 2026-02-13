@@ -6,7 +6,8 @@
       "Bash(curl:*)",
       "Bash(npm run dev:*)",
       "Bash(npm ls:*)",
-      "Bash(copy:*)"
+      "Bash(copy:*)",
+      "Bash(cmd //c \"rename kangaroo DeepConverge\")"
     ]
   }
 }

@@ -456,7 +456,7 @@ export default function DebateCanvas({
 
   if (phase === "loading") {
     return (
-      <div className="h-screen flex flex-col overflow-hidden bg-gradient-to-b from-[#f8f6f8] to-[#faf8f7]">
+      <div className="h-screen flex flex-col overflow-hidden bg-gradient-to-b from-[#fafafa] to-white">
         {/* Header */}
         <header className="flex-shrink-0 flex items-center justify-between px-6 py-4">
           <button
@@ -480,10 +480,10 @@ export default function DebateCanvas({
           </button>
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-lg bg-[#76b900] flex items-center justify-center">
-              <span className="text-white font-bold text-xs">K</span>
+              <span className="text-white font-bold text-[9px]">DC</span>
             </div>
             <span className="font-semibold text-gray-800 text-sm">
-              Debate Arena
+              DeepConverge
             </span>
           </div>
           <div className="w-16" />
@@ -551,7 +551,7 @@ export default function DebateCanvas({
   // ── DEBATE VIEW (presenting + complete) ────────────────────────────
 
   return (
-    <div className="min-h-screen flex flex-col bg-gradient-to-b from-[#f8f6f8] to-[#faf8f7]">
+    <div className="min-h-screen flex flex-col bg-gradient-to-b from-[#fafafa] to-white">
       {/* Header */}
       <header className="flex-shrink-0 flex items-center justify-between px-6 py-4">
         <button
@@ -575,10 +575,10 @@ export default function DebateCanvas({
         </button>
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-[#76b900] flex items-center justify-center">
-            <span className="text-white font-bold text-xs">K</span>
+            <span className="text-white font-bold text-[9px]">DC</span>
           </div>
           <span className="font-semibold text-gray-800 text-sm">
-            Debate Arena
+            DeepConverge
           </span>
         </div>
         <div className="text-xs text-gray-400 flex items-center gap-2">

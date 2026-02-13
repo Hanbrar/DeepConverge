@@ -8,8 +8,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Kangaroo - AI Debate Platform",
-  description: "Ask a question. Watch AIs debate. Get a smarter answer.",
+  title: "DeepConverge - Multi-Agent AI Platform",
+  description: "Multi-agent reasoning and AI debates powered by NVIDIA Nemotron.",
 };
 
 export default function RootLayout({
