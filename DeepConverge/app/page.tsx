@@ -81,6 +81,7 @@ export default function Home() {
   const handleNewChat = () => {
     setMessages([]);
     setInput("");
+    setDebatePhase("setup");
     setMode("agentic");
   };
 
@@ -204,26 +205,11 @@ export default function Home() {
     setDebatePhase("active");
   };
 
-  const onDebateBack = () => {
-    setDebatePhase("setup");
-  };
-
   const debateRounds = debateType === "regular" ? 2 : continuousRounds;
-
-  // ── DEBATE ACTIVE → full-screen DebateCanvas ──────────────────────────
-  if (mode === "debate" && debatePhase === "active") {
-    return (
-      <DebateCanvas
-        question={debateQuestion}
-        rounds={debateRounds}
-        onBack={onDebateBack}
-      />
-    );
-  }
-
   // ── Derived values ───────────────────────────────────────────────────
   const sidebarWidth = sidebarOpen ? 240 : 56;
   const isAgenticMode = mode === "agentic";
+  const isDebateActive = mode === "debate" && debatePhase === "active";
   const isLanding = messages.length === 0;
 
   // ── SINGLE-PAGE SHELL ────────────────────────────────────────────────
@@ -316,7 +302,14 @@ export default function Home() {
         className="flex-1 flex flex-col min-h-screen transition-all duration-200"
         style={{ marginLeft: sidebarWidth }}
       >
-        {isLanding ? (
+        {isDebateActive ? (
+          <div className="flex-1 min-h-0">
+            <DebateCanvas
+              question={debateQuestion}
+              rounds={debateRounds}
+            />
+          </div>
+        ) : isLanding ? (
           /* ── LANDING VIEW: Title + Converging Arrows + Content ──── */
           <main className="flex-1 flex flex-col items-center justify-center px-4">
             {/* Title */}

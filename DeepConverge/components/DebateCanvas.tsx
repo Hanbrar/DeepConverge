@@ -18,7 +18,6 @@ interface DebateCanvasProps {
   question: string;
   rounds: number;
   onComplete?: () => void;
-  onBack?: () => void;
 }
 
 type Phase = "loading" | "presenting" | "complete";
@@ -72,7 +71,6 @@ export default function DebateCanvas({
   question,
   rounds,
   onComplete,
-  onBack,
 }: DebateCanvasProps) {
   // ── State ──
   const [phase, setPhase] = useState<Phase>("loading");
@@ -456,36 +454,21 @@ export default function DebateCanvas({
 
   if (phase === "loading") {
     return (
-      <div className="h-screen flex flex-col overflow-hidden bg-gradient-to-b from-[#fafafa] to-white">
+      <div className="h-full min-h-0 flex flex-col overflow-hidden bg-[#fffaf3]">
         {/* Header */}
         <header className="flex-shrink-0 flex items-center justify-between px-6 py-4">
-          <button
-            onClick={onBack}
-            className="flex items-center gap-2 text-gray-400 hover:text-gray-700 transition-colors text-sm"
-          >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M15 19l-7-7 7-7"
-              />
-            </svg>
-            Back
-          </button>
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-[#76b900] flex items-center justify-center">
-              <span className="text-white font-bold text-[9px]">DC</span>
-            </div>
-            <span className="font-semibold text-gray-800 text-sm">
-              DeepConverge
-            </span>
-          </div>
+          <div className="w-16" aria-hidden="true" />
+          <span className="font-semibold text-[#2d2d2d] text-lg whitespace-nowrap flex items-center gap-1">
+            <span>DeepConverge</span>
+            <Image
+              src="/bestlogo.png"
+              alt="DeepConverge logo"
+              width={42}
+              height={42}
+              className="object-contain -ml-2"
+              priority
+            />
+          </span>
           <div className="w-16" />
         </header>
 
@@ -551,36 +534,21 @@ export default function DebateCanvas({
   // ── DEBATE VIEW (presenting + complete) ────────────────────────────
 
   return (
-    <div className="min-h-screen flex flex-col bg-gradient-to-b from-[#fafafa] to-white">
+    <div className="h-full min-h-0 flex flex-col bg-[#fffaf3]">
       {/* Header */}
       <header className="flex-shrink-0 flex items-center justify-between px-6 py-4">
-        <button
-          onClick={onBack}
-          className="flex items-center gap-2 text-gray-400 hover:text-gray-700 transition-colors text-sm"
-        >
-          <svg
-            className="w-4 h-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M15 19l-7-7 7-7"
-            />
-          </svg>
-          Back
-        </button>
-        <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-[#76b900] flex items-center justify-center">
-            <span className="text-white font-bold text-[9px]">DC</span>
-          </div>
-          <span className="font-semibold text-gray-800 text-sm">
-            DeepConverge
-          </span>
-        </div>
+        <div className="w-16" aria-hidden="true" />
+        <span className="font-semibold text-[#2d2d2d] text-lg whitespace-nowrap flex items-center gap-1">
+          <span>DeepConverge</span>
+          <Image
+            src="/bestlogo.png"
+            alt="DeepConverge logo"
+            width={42}
+            height={42}
+            className="object-contain -ml-2"
+            priority
+          />
+        </span>
         <div className="text-xs text-gray-400 flex items-center gap-2">
           {phase === "presenting" && (
             <>
