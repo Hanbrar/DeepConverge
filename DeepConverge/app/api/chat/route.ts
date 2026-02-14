@@ -1,33 +1,172 @@
 import { NextRequest } from "next/server";
 
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
+
 const MODEL_IDS = {
   nemotron9b: "nvidia/nemotron-nano-9b-v2:free",
   nemotron30b: "nvidia/nemotron-3-nano-30b-a3b",
 } as const;
 
 type ChatModel = keyof typeof MODEL_IDS;
+type ChatMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+};
 
 const CHAT_SYSTEM_PROMPT = [
-  "You are DeepConverge, a productivity-focused AI chat assistant.",
-  "Operate like a high-throughput work copilot: optimize for clarity, speed, and useful execution.",
-  "This is a chat interface, so keep responses natural and context-aware, not essay-like by default.",
-  "For greetings or lightweight messages (e.g., 'hey', 'hi', 'thanks'), reply in one short friendly sentence.",
-  "Default to concise, action-oriented output with practical next steps.",
-  "Use longer explanations only when the user explicitly asks for depth.",
-  "Do not provide dictionary-style breakdowns unless requested.",
-  "Do not expose private chain-of-thought; provide brief rationale summaries when needed.",
+  "You are DeepConverge, a productivity-focused AI assistant.",
+  "This is a live chat UX: default to concise, practical, and context-aware answers.",
+  "For short greetings or social pings (e.g., 'hey', 'hi', 'thanks'), respond in one short sentence.",
+  "Avoid dictionary-style breakdowns unless asked.",
+  "Prioritize direct execution guidance, clear structure, and next steps.",
+  "Do not expose private chain-of-thought.",
 ].join(" ");
+
+const MAX_CONVERGENCE_ROUNDS = 4;
+
+function extractText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) =>
+        typeof item === "string"
+          ? item
+          : typeof item === "object" &&
+            item !== null &&
+            "text" in item &&
+            typeof (item as { text?: unknown }).text === "string"
+          ? (item as { text: string }).text
+          : ""
+      )
+      .join("");
+  }
+  return "";
+}
+
+function extractAssistantText(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const firstChoice = (payload as { choices?: Array<{ message?: { content?: unknown; reasoning?: unknown } }> })
+    .choices?.[0];
+  if (!firstChoice?.message) return "";
+  const content = extractText(firstChoice.message.content);
+  if (content.trim()) return content.trim();
+  const reasoning = extractText(firstChoice.message.reasoning);
+  return reasoning.trim();
+}
+
+function parseJudgeJson(raw: string): {
+  convergence_score: number;
+  converged: boolean;
+  synthesis: string;
+  direction_for_next_round: string;
+  unresolved_points: string[];
+  clarifying_questions: string[];
+  final_direction: string;
+} | null {
+  const fenced = raw.match(/```json\s*([\s\S]*?)```/i)?.[1];
+  const candidate =
+    fenced ??
+    raw.match(/\{[\s\S]*\}/)?.[0] ??
+    "";
+  if (!candidate) return null;
+
+  try {
+    const parsed = JSON.parse(candidate) as Record<string, unknown>;
+    return {
+      convergence_score:
+        typeof parsed.convergence_score === "number"
+          ? Math.max(0, Math.min(100, parsed.convergence_score))
+          : 0,
+      converged: parsed.converged === true,
+      synthesis:
+        typeof parsed.synthesis === "string" ? parsed.synthesis.trim() : "",
+      direction_for_next_round:
+        typeof parsed.direction_for_next_round === "string"
+          ? parsed.direction_for_next_round.trim()
+          : "",
+      unresolved_points: Array.isArray(parsed.unresolved_points)
+        ? parsed.unresolved_points.filter((x): x is string => typeof x === "string")
+        : [],
+      clarifying_questions: Array.isArray(parsed.clarifying_questions)
+        ? parsed.clarifying_questions.filter((x): x is string => typeof x === "string")
+        : [],
+      final_direction:
+        typeof parsed.final_direction === "string"
+          ? parsed.final_direction.trim()
+          : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function estimateAgreementScore(a: string, b: string): number {
+  const tokensA = new Set(
+    (a.toLowerCase().match(/[a-z0-9]{4,}/g) || []).slice(0, 200)
+  );
+  const tokensB = new Set(
+    (b.toLowerCase().match(/[a-z0-9]{4,}/g) || []).slice(0, 200)
+  );
+  if (tokensA.size === 0 || tokensB.size === 0) return 35;
+  let overlap = 0;
+  for (const token of tokensA) {
+    if (tokensB.has(token)) overlap++;
+  }
+  const ratio = overlap / Math.max(tokensA.size, tokensB.size);
+  return Math.max(20, Math.min(85, Math.round(ratio * 100)));
+}
+
+function statusFromScore(score: number, converged: boolean, needsInput: boolean) {
+  if (needsInput) return "needs_input";
+  if (converged || score >= 80) return "converged";
+  return "running";
+}
+
+async function completeOnce(params: {
+  apiKey: string;
+  model: string;
+  messages: ChatMessage[];
+  maxTokens?: number;
+  temperature?: number;
+  reasoning?: { effort?: "none" | "low" | "medium" | "high"; exclude?: boolean };
+}) {
+  const response = await fetch(OPENROUTER_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${params.apiKey}`,
+      "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
+      "X-Title": "DeepConverge AI",
+    },
+    body: JSON.stringify({
+      model: params.model,
+      messages: params.messages,
+      stream: false,
+      max_tokens: params.maxTokens ?? 1024,
+      temperature: params.temperature ?? 0.4,
+      reasoning: params.reasoning,
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`OpenRouter API error: ${response.status} - ${errText}`);
+  }
+
+  const json = await response.json();
+  return extractAssistantText(json);
+}
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const message = typeof body?.message === "string" ? body.message : "";
+    const message = typeof body?.message === "string" ? body.message.trim() : "";
     const requestedModel =
       typeof body?.model === "string" ? (body.model as ChatModel) : undefined;
     const thinkingRequested = body?.thinking === true;
+    const convergentThinking = body?.convergentThinking === true;
 
-    if (!message || typeof message !== "string") {
+    if (!message) {
       return new Response(JSON.stringify({ error: "Message is required" }), {
         status: 400,
         headers: { "Content-Type": "application/json" },
@@ -48,9 +187,304 @@ export async function POST(request: NextRequest) {
         : thinkingRequested
         ? "nemotron30b"
         : "nemotron9b";
-    const enableThinking =
-      thinkingRequested || resolvedModel === "nemotron30b";
 
+    if (convergentThinking) {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          let isClosed = false;
+          const safeClose = () => {
+            if (isClosed) return;
+            try {
+              controller.close();
+            } catch {
+              // Stream may already be closed/cancelled by the client.
+            } finally {
+              isClosed = true;
+            }
+          };
+          const send = (payload: Record<string, unknown>) => {
+            if (isClosed) return;
+            try {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(payload)}\n\n`)
+              );
+            } catch {
+              // Avoid crashing when client disconnects mid-stream.
+              isClosed = true;
+            }
+          };
+
+          let finalContent = "";
+
+          try {
+            const convergentModel = MODEL_IDS.nemotron30b;
+            send({
+              type: "convergent_start",
+              round: 0,
+              maxRounds: MAX_CONVERGENCE_ROUNDS,
+              score: 8,
+              status: "running",
+            });
+
+            const kickoff = await completeOnce({
+              apiKey,
+              model: convergentModel,
+              temperature: 0.3,
+              maxTokens: 350,
+              reasoning: { effort: "none", exclude: true },
+              messages: [
+                {
+                  role: "system",
+                  content:
+                    "You are the Judge in a convergent-thinking multi-agent workflow. State the task framing, evaluation criteria, and convergence target in 3 concise bullets.",
+                },
+                {
+                  role: "user",
+                  content: `Task: ${message}`,
+                },
+              ],
+            });
+
+            send({
+              type: "convergent_log",
+              role: "judge",
+              round: 0,
+              content: kickoff,
+            });
+
+            let score = 12;
+            let converged = false;
+            let needsInput = false;
+            let finalDirection = "";
+            let clarifyingQuestions: string[] = [];
+            let unresolvedPoints: string[] = [];
+            let latestA = "";
+            let latestB = "";
+            let latestJudgeDirection = kickoff;
+            const transcript: string[] = [
+              `User task: ${message}`,
+              `Judge kickoff: ${kickoff}`,
+            ];
+
+            for (let round = 1; round <= MAX_CONVERGENCE_ROUNDS; round++) {
+              const contextTail = transcript.slice(-10).join("\n\n");
+
+              latestA = await completeOnce({
+                apiKey,
+                model: convergentModel,
+                temperature: 0.55,
+                maxTokens: 700,
+                reasoning: { effort: "none", exclude: true },
+                messages: [
+                  {
+                    role: "system",
+                    content:
+                      "You are Debater A. Produce a concise, practical proposal for the task. Focus on execution and measurable outcomes.",
+                  },
+                  {
+                    role: "user",
+                    content: `Task: ${message}\n\nCurrent context:\n${contextTail}\n\nJudge direction:\n${latestJudgeDirection}\n\nGive your round-${round} position.`,
+                  },
+                ],
+              });
+
+              send({
+                type: "convergent_log",
+                role: "debater_a",
+                round,
+                content: latestA,
+              });
+
+              latestB = await completeOnce({
+                apiKey,
+                model: convergentModel,
+                temperature: 0.6,
+                maxTokens: 700,
+                reasoning: { effort: "none", exclude: true },
+                messages: [
+                  {
+                    role: "system",
+                    content:
+                      "You are Debater B. Stress-test assumptions, identify risk, and propose a competing but practical path.",
+                  },
+                  {
+                    role: "user",
+                    content: `Task: ${message}\n\nContext:\n${contextTail}\n\nDebater A round-${round}:\n${latestA}\n\nJudge direction:\n${latestJudgeDirection}\n\nGive your round-${round} position.`,
+                  },
+                ],
+              });
+
+              send({
+                type: "convergent_log",
+                role: "debater_b",
+                round,
+                content: latestB,
+              });
+
+              const judgeRaw = await completeOnce({
+                apiKey,
+                model: convergentModel,
+                temperature: 0.2,
+                maxTokens: 900,
+                reasoning: { effort: "none", exclude: true },
+                messages: [
+                  {
+                    role: "system",
+                    content:
+                      "You are the Judge. Compare Debater A vs Debater B and return strict JSON only with keys: convergence_score (0-100), converged (boolean), synthesis, direction_for_next_round, unresolved_points (string array), clarifying_questions (string array), final_direction.",
+                  },
+                  {
+                    role: "user",
+                    content: `Task: ${message}\n\nDebater A:\n${latestA}\n\nDebater B:\n${latestB}\n\nCurrent round: ${round}\n\nIf convergence is high, set converged=true and final_direction. If convergence is low and this is final round (${MAX_CONVERGENCE_ROUNDS}), include 2-4 clarifying_questions.`,
+                  },
+                ],
+              });
+
+              const judgeParsed = parseJudgeJson(judgeRaw);
+              const judgeSynthesis =
+                judgeParsed?.synthesis ||
+                "The agents are still refining toward a practical consensus.";
+              latestJudgeDirection =
+                judgeParsed?.direction_for_next_round || judgeSynthesis;
+
+              send({
+                type: "convergent_log",
+                role: "judge",
+                round,
+                content:
+                  judgeParsed
+                    ? `${judgeSynthesis}\n\nDirection: ${judgeParsed.direction_for_next_round || "Continue refining tradeoffs."}`
+                    : judgeSynthesis,
+              });
+
+              score = judgeParsed?.convergence_score ?? estimateAgreementScore(latestA, latestB);
+              converged = judgeParsed?.converged === true || score >= 80;
+              finalDirection = judgeParsed?.final_direction || latestJudgeDirection;
+              unresolvedPoints = judgeParsed?.unresolved_points || [];
+              clarifyingQuestions = judgeParsed?.clarifying_questions || [];
+              needsInput =
+                !converged &&
+                round === MAX_CONVERGENCE_ROUNDS &&
+                clarifyingQuestions.length > 0;
+
+              send({
+                type: "convergence_state",
+                round,
+                maxRounds: MAX_CONVERGENCE_ROUNDS,
+                score,
+                status: statusFromScore(score, converged, needsInput),
+              });
+
+              transcript.push(
+                `Round ${round} Debater A: ${latestA}`,
+                `Round ${round} Debater B: ${latestB}`,
+                `Round ${round} Judge: ${judgeSynthesis}`,
+              );
+
+              if (converged) break;
+            }
+
+            if (converged) {
+              const executorOutput = await completeOnce({
+                apiKey,
+                model: convergentModel,
+                temperature: 0.35,
+                maxTokens: 1100,
+                reasoning: { effort: "none", exclude: true },
+                messages: [
+                  {
+                    role: "system",
+                    content:
+                      "You are the Execution Agent. Turn the judge's converged direction into the final response for the user. Be concrete, actionable, and concise.",
+                  },
+                  {
+                    role: "user",
+                    content: `Task: ${message}\n\nJudge final direction:\n${finalDirection}\n\nDebater A final:\n${latestA}\n\nDebater B final:\n${latestB}\n\nProduce the final answer.`,
+                  },
+                ],
+              });
+
+              send({
+                type: "convergent_log",
+                role: "executor",
+                round: MAX_CONVERGENCE_ROUNDS,
+                content: executorOutput,
+              });
+
+              finalContent = executorOutput;
+              send({
+                type: "convergence_state",
+                round: MAX_CONVERGENCE_ROUNDS,
+                maxRounds: MAX_CONVERGENCE_ROUNDS,
+                score: Math.max(score, 82),
+                status: "converged",
+              });
+              send({ type: "content", content: finalContent });
+            } else {
+              const fallbackQuestions =
+                clarifyingQuestions.length > 0
+                  ? clarifyingQuestions
+                  : [
+                      "What outcome matters most: speed, quality, or cost?",
+                      "What constraints are non-negotiable?",
+                    ];
+              const unresolvedText =
+                unresolvedPoints.length > 0
+                  ? unresolvedPoints.map((p, i) => `${i + 1}. ${p}`).join("\n")
+                  : "The agents disagree on tradeoffs and prioritization details.";
+
+              send({
+                type: "clarifying_questions",
+                questions: fallbackQuestions,
+              });
+              send({
+                type: "convergence_state",
+                round: MAX_CONVERGENCE_ROUNDS,
+                maxRounds: MAX_CONVERGENCE_ROUNDS,
+                score,
+                status: "needs_input",
+              });
+
+              finalContent = [
+                "The agents have not fully converged yet.",
+                "",
+                "Current unresolved points:",
+                unresolvedText,
+                "",
+                "Please clarify the following so I can restart convergent thinking with your constraints:",
+                ...fallbackQuestions.map((q, i) => `${i + 1}. ${q}`),
+              ].join("\n");
+              send({ type: "content", content: finalContent });
+            }
+
+            send({
+              type: "done",
+              reasoning: "",
+              content: finalContent,
+            });
+            safeClose();
+          } catch (error) {
+            console.error("Convergent chat error:", error);
+            const messageText =
+              "Convergent Thinking Mode ran into an error. Please try again.";
+            send({ type: "content", content: messageText });
+            send({ type: "done", reasoning: "", content: messageText });
+            safeClose();
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      });
+    }
+
+    const enableThinking = thinkingRequested || resolvedModel === "nemotron30b";
     const response = await fetch(OPENROUTER_API_URL, {
       method: "POST",
       headers: {
@@ -90,12 +524,34 @@ export async function POST(request: NextRequest) {
     }
 
     const encoder = new TextEncoder();
-
     const stream = new ReadableStream({
       async start(controller) {
+        let isClosed = false;
+        const safeClose = () => {
+          if (isClosed) return;
+          try {
+            controller.close();
+          } catch {
+            // Stream may already be closed/cancelled by the client.
+          } finally {
+            isClosed = true;
+          }
+        };
+        const safeEnqueue = (payload: Record<string, unknown>) => {
+          if (isClosed) return;
+          try {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(payload)}\n\n`)
+            );
+          } catch {
+            // Avoid throwing ERR_INVALID_STATE after disconnect/close.
+            isClosed = true;
+          }
+        };
+
         const reader = response.body?.getReader();
         if (!reader) {
-          controller.close();
+          safeClose();
           return;
         }
 
@@ -103,6 +559,29 @@ export async function POST(request: NextRequest) {
         let buffer = "";
         let reasoning = "";
         let content = "";
+        const processLine = (line: string) => {
+          if (!line.startsWith("data: ")) return;
+          const data = line.slice(6);
+          if (data === "[DONE]") return;
+
+          try {
+            const parsed = JSON.parse(data);
+            const delta = parsed.choices?.[0]?.delta;
+            const reasoningChunk = delta?.reasoning || "";
+            if (reasoningChunk) {
+              reasoning += reasoningChunk;
+              safeEnqueue({ type: "reasoning", content: reasoning });
+            }
+
+            const contentChunk = delta?.content || "";
+            if (contentChunk) {
+              content += contentChunk;
+              safeEnqueue({ type: "content", content });
+            }
+          } catch {
+            // Skip invalid JSON
+          }
+        };
 
         try {
           while (true) {
@@ -114,56 +593,24 @@ export async function POST(request: NextRequest) {
             buffer = lines.pop() || "";
 
             for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                const data = line.slice(6);
-                if (data === "[DONE]") continue;
-
-                try {
-                  const parsed = JSON.parse(data);
-                  const delta = parsed.choices?.[0]?.delta;
-
-                  // Handle reasoning from Nemotron's native reasoning field
-                  const reasoningChunk = delta?.reasoning || "";
-                  if (reasoningChunk) {
-                    reasoning += reasoningChunk;
-                    controller.enqueue(
-                      encoder.encode(
-                        `data: ${JSON.stringify({ type: "reasoning", content: reasoning })}\n\n`
-                      )
-                    );
-                  }
-
-                  // Handle content
-                  const contentChunk = delta?.content || "";
-                  if (contentChunk) {
-                    content += contentChunk;
-                    controller.enqueue(
-                      encoder.encode(
-                        `data: ${JSON.stringify({ type: "content", content })}\n\n`
-                      )
-                    );
-                  }
-                } catch {
-                  // Skip invalid JSON
-                }
-              }
+              processLine(line);
             }
           }
 
-          // Send final done signal and close
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "done", reasoning, content })}\n\n`
-            )
-          );
-          controller.close();
+          // Flush any remaining decoder/buffer tail to avoid clipped last tokens.
+          buffer += decoder.decode();
+          if (buffer.trim()) {
+            const tailLines = buffer.split("\n");
+            for (const line of tailLines) {
+              processLine(line.trimEnd());
+            }
+          }
+
+          safeEnqueue({ type: "done", reasoning, content });
+          safeClose();
         } catch (error) {
           console.error("Stream error:", error);
-          try {
-            controller.close();
-          } catch {
-            // Controller may already be closed
-          }
+          safeClose();
         }
       },
     });

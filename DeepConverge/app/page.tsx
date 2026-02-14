@@ -16,6 +16,19 @@ interface Message {
   content: string;
   reasoning?: string;
   isStreaming?: boolean;
+  convergent?: {
+    status: "idle" | "running" | "converged" | "needs_input";
+    score: number;
+    round: number;
+    maxRounds: number;
+    logs: Array<{
+      id: string;
+      role: "judge" | "debater_a" | "debater_b" | "executor";
+      round: number;
+      content: string;
+    }>;
+    clarifyingQuestions: string[];
+  };
 }
 
 type Mode = "agentic" | "debate";
@@ -44,7 +57,9 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [selectedModel, setSelectedModel] = useState<AgenticModel>("nemotron9b");
-  const [thinkingEnabled, setThinkingEnabled] = useState(false);
+  const [convergentEnabled, setConvergentEnabled] = useState(false);
+  const [expandedConvergent, setExpandedConvergent] = useState<Record<string, boolean>>({});
+  const [animatedConvergence, setAnimatedConvergence] = useState<Record<string, number>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const agenticPanelRef = useRef<HTMLDivElement>(null);
   const debatePanelRef = useRef<HTMLDivElement>(null);
@@ -61,6 +76,40 @@ export default function Home() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setAnimatedConvergence((prev) => {
+        let changed = false;
+        const next = { ...prev };
+
+        for (const msg of messages) {
+          if (msg.role !== "assistant" || !msg.convergent) continue;
+          const target = Math.max(0, Math.min(100, msg.convergent.score));
+          const current = next[msg.id] ?? target;
+          const delta = target - current;
+
+          if (Math.abs(delta) > 0.2) {
+            next[msg.id] = current + delta * 0.18;
+            changed = true;
+          } else if (current !== target) {
+            next[msg.id] = target;
+            changed = true;
+          }
+        }
+
+        return changed ? next : prev;
+      });
+    }, 32);
+
+    return () => clearInterval(timer);
+  }, [messages]);
+
+  const getConvergencePhase = (score: number) => {
+    if (score < 40) return "Diverging";
+    if (score < 75) return "Balanced";
+    return "Converging";
+  };
 
   const syncModePanelHeight = () => {
     const activePanel = mode === "agentic" ? agenticPanelRef.current : debatePanelRef.current;
@@ -94,6 +143,8 @@ export default function Home() {
 
   const handleNewChat = () => {
     setMessages([]);
+    setExpandedConvergent({});
+    setAnimatedConvergence({});
     setInput("");
     setDebatePhase("setup");
     setMode("agentic");
@@ -106,11 +157,10 @@ export default function Home() {
 
   const handleModelChange = (model: AgenticModel) => {
     setSelectedModel(model);
-    setThinkingEnabled(model === "nemotron30b");
   };
 
-  const handleThinkingToggle = (enabled: boolean) => {
-    setThinkingEnabled(enabled);
+  const handleConvergentToggle = (enabled: boolean) => {
+    setConvergentEnabled(enabled);
     setSelectedModel(enabled ? "nemotron30b" : "nemotron9b");
   };
 
@@ -130,6 +180,16 @@ export default function Home() {
       content: "",
       reasoning: "",
       isStreaming: true,
+      convergent: convergentEnabled
+        ? {
+            status: "idle",
+            score: 0,
+            round: 0,
+            maxRounds: 0,
+            logs: [],
+            clarifyingQuestions: [],
+          }
+        : undefined,
     };
 
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
@@ -146,7 +206,8 @@ export default function Home() {
         body: JSON.stringify({
           message: input.trim(),
           model: selectedModel,
-          thinking: thinkingEnabled,
+          thinking: convergentEnabled,
+          convergentThinking: convergentEnabled,
         }),
         signal: abortController.signal,
       });
@@ -182,6 +243,99 @@ export default function Home() {
                       : msg
                   )
                 );
+              } else if (data.type === "convergent_start") {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMessage.id
+                      ? {
+                          ...msg,
+                          convergent: {
+                            status: "running",
+                            score: typeof data.score === "number" ? data.score : 0,
+                            round: typeof data.round === "number" ? data.round : 0,
+                            maxRounds: typeof data.maxRounds === "number" ? data.maxRounds : 0,
+                            logs: msg.convergent?.logs || [],
+                            clarifyingQuestions: msg.convergent?.clarifyingQuestions || [],
+                          },
+                        }
+                      : msg
+                  )
+                );
+              } else if (data.type === "convergent_log") {
+                setMessages((prev) =>
+                  prev.map((msg) => {
+                    if (msg.id !== assistantMessage.id) return msg;
+                    const log = {
+                      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                      role: data.role as "judge" | "debater_a" | "debater_b" | "executor",
+                      round: typeof data.round === "number" ? data.round : 0,
+                      content: typeof data.content === "string" ? data.content : "",
+                    };
+                    return {
+                      ...msg,
+                      convergent: {
+                        status: msg.convergent?.status || "running",
+                        score: msg.convergent?.score ?? 0,
+                        round: msg.convergent?.round ?? 0,
+                        maxRounds: msg.convergent?.maxRounds ?? 0,
+                        logs: [...(msg.convergent?.logs || []), log],
+                        clarifyingQuestions: msg.convergent?.clarifyingQuestions || [],
+                      },
+                    };
+                  })
+                );
+              } else if (data.type === "convergence_state") {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMessage.id
+                      ? {
+                          ...msg,
+                          convergent: {
+                            status:
+                              data.status === "converged"
+                                ? "converged"
+                                : data.status === "needs_input"
+                                ? "needs_input"
+                                : "running",
+                            score:
+                              typeof data.score === "number"
+                                ? data.score
+                                : msg.convergent?.score ?? 0,
+                            round:
+                              typeof data.round === "number"
+                                ? data.round
+                                : msg.convergent?.round ?? 0,
+                            maxRounds:
+                              typeof data.maxRounds === "number"
+                                ? data.maxRounds
+                                : msg.convergent?.maxRounds ?? 0,
+                            logs: msg.convergent?.logs || [],
+                            clarifyingQuestions: msg.convergent?.clarifyingQuestions || [],
+                          },
+                        }
+                      : msg
+                  )
+                );
+              } else if (data.type === "clarifying_questions") {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMessage.id
+                      ? {
+                          ...msg,
+                          convergent: {
+                            status: "needs_input",
+                            score: msg.convergent?.score ?? 0,
+                            round: msg.convergent?.round ?? 0,
+                            maxRounds: msg.convergent?.maxRounds ?? 0,
+                            logs: msg.convergent?.logs || [],
+                            clarifyingQuestions: Array.isArray(data.questions)
+                              ? data.questions
+                              : [],
+                          },
+                        }
+                      : msg
+                  )
+                );
               } else if (data.type === "content") {
                 setMessages((prev) =>
                   prev.map((msg) =>
@@ -194,7 +348,19 @@ export default function Home() {
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === assistantMessage.id
-                      ? { ...msg, isStreaming: false }
+                      ? {
+                          ...msg,
+                          isStreaming: false,
+                          convergent: msg.convergent
+                            ? {
+                                ...msg.convergent,
+                                status:
+                                  msg.convergent.status === "running"
+                                    ? "converged"
+                                    : msg.convergent.status,
+                              }
+                            : undefined,
+                        }
                       : msg
                   )
                 );
@@ -340,7 +506,7 @@ export default function Home() {
                 {AGENTIC_MODELS[selectedModel].display}
               </p>
               <p className="text-[11px] text-[#6b7280]">
-                Deep Thinking: {thinkingEnabled ? "On" : "Off"}
+                Convergent Thinking: {convergentEnabled ? "On" : "Off"}
               </p>
             </div>
           </div>
@@ -504,7 +670,7 @@ export default function Home() {
                       <select
                         value={selectedModel}
                         onChange={(e) => handleModelChange(e.target.value as AgenticModel)}
-                        disabled={isLoading}
+                        disabled={isLoading || convergentEnabled}
                         tabIndex={isAgenticMode ? 0 : -1}
                         className="h-8 rounded-lg border border-[#e5e7eb] bg-[#fffaf2] px-2 text-xs text-[#4b5563] outline-none focus:ring-2 focus:ring-[#7c6bf5]/30 disabled:opacity-60"
                       >
@@ -514,29 +680,29 @@ export default function Home() {
                       <div className="inline-flex rounded-lg border border-[#e5e7eb] overflow-hidden">
                         <button
                           type="button"
-                          onClick={() => handleThinkingToggle(false)}
+                          onClick={() => handleConvergentToggle(false)}
                           disabled={isLoading}
                           tabIndex={isAgenticMode ? 0 : -1}
                           className={`h-8 px-2 text-xs transition-colors ${
-                            !thinkingEnabled
+                            !convergentEnabled
                               ? "bg-[#2d2d2d] text-white"
                               : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
                           } disabled:opacity-60`}
                         >
-                          Not Thinking
+                          Convergent Off
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleThinkingToggle(true)}
+                          onClick={() => handleConvergentToggle(true)}
                           disabled={isLoading}
                           tabIndex={isAgenticMode ? 0 : -1}
                           className={`h-8 px-2 text-xs transition-colors ${
-                            thinkingEnabled
+                            convergentEnabled
                               ? "bg-[#2d2d2d] text-white"
                               : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
                           } disabled:opacity-60`}
                         >
-                          Thinking
+                          Convergent On
                         </button>
                       </div>
                     </div>
@@ -698,7 +864,7 @@ export default function Home() {
           /* ── ACTIVE CHAT VIEW: Messages + Input bar ────────────── */
           <>
             <main className="flex-1 pb-32 px-4">
-              <div className="max-w-3xl mx-auto space-y-6">
+              <div className="w-full max-w-5xl mx-auto space-y-6 px-2 sm:px-4">
                 {/* Compact mode toggle */}
                 <div className="flex items-center justify-center gap-10 pt-6 mb-4">
                   <button
@@ -735,14 +901,20 @@ export default function Home() {
                     ) : (
                       <div className="space-y-3">
                         <div className="flex items-center gap-2 text-xs text-[#76b900]">
-                          <span className="w-4 h-4 rounded bg-[#76b900] flex items-center justify-center">
-                            <span className="text-white text-[10px] font-bold">N</span>
+                          <span className="w-4 h-4 rounded overflow-hidden border border-[#d1d5db] bg-white flex items-center justify-center">
+                            <Image
+                              src="/nvidia_logo.png"
+                              alt="NVIDIA logo"
+                              width={16}
+                              height={16}
+                              className="object-contain"
+                            />
                           </span>
                           Nemotron
                         </div>
 
                         {message.reasoning && (
-                          <div className="bg-[#f9fafb] border border-[#e5e7eb] rounded-xl overflow-hidden">
+                          <div className="bg-[#f9fafb] border border-[#e5e7eb] rounded-xl overflow-hidden shadow-sm">
                             <div className="px-4 py-2 border-b border-[#e5e7eb] text-sm font-medium text-[#4b5563] flex items-center gap-2">
                               {message.isStreaming && !message.content ? (
                                 <>
@@ -758,33 +930,203 @@ export default function Home() {
                                 </>
                               )}
                             </div>
-                            <div className="px-4 py-3 text-sm text-[#4b5563] whitespace-pre-wrap max-h-64 overflow-y-auto">
-                              {message.reasoning}
+                            <div className="px-4 py-3">
+                              <div className="prose prose-sm max-w-none prose-headings:text-[#2d2d2d] prose-p:text-[#374151] prose-strong:text-[#1f2937] prose-code:bg-[#f3f4f6] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[#1f2937] prose-pre:text-gray-100">
+                                <ReactMarkdown
+                                  remarkPlugins={[remarkMath, remarkGfm]}
+                                  rehypePlugins={[rehypeKatex]}
+                                >
+                                  {preprocessLaTeX(message.reasoning || "")}
+                                </ReactMarkdown>
+                              </div>
                               {message.isStreaming && !message.content && (
-                                <span className="inline-block w-2 h-4 bg-[#4b5563]/50 animate-pulse ml-1" />
+                                <span className="inline-block w-2 h-4 bg-[#4b5563]/50 animate-pulse ml-1 align-middle" />
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {message.convergent && (
+                          <div className="bg-gradient-to-br from-[#f8fafc] via-[#f8fbff] to-[#f5f7ff] border border-[#d6deea] rounded-2xl overflow-hidden shadow-sm">
+                            <div className="px-4 py-2.5 border-b border-[#dbe3ea] bg-gradient-to-r from-[#edf2f8] to-[#eef5ff] flex items-center justify-between gap-3">
+                              <div className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full bg-[#6366f1]" />
+                                <span className="text-sm font-semibold text-[#1f2937]">
+                                  Convergent Thinking Mode
+                                </span>
+                                <span className="text-[11px] px-2 py-0.5 rounded-full bg-white border border-[#dbe3ea] text-[#64748b]">
+                                  {message.convergent.status === "needs_input"
+                                    ? "Needs Input"
+                                    : message.convergent.status === "converged"
+                                    ? "Converged"
+                                    : "Running"}
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedConvergent((prev) => ({
+                                    ...prev,
+                                    [message.id]: !prev[message.id],
+                                  }))
+                                }
+                                className="text-xs font-semibold text-[#475569] hover:text-[#0f172a] transition-colors"
+                              >
+                                {expandedConvergent[message.id] ? "Collapse" : "Expand"}
+                              </button>
+                            </div>
+
+                            <div className="px-4 py-3 space-y-3">
+                              <div>
+                                {(() => {
+                                  const meterScoreRaw = animatedConvergence[message.id] ?? message.convergent.score;
+                                  const meterScore = Math.max(0, Math.min(100, Math.round(meterScoreRaw)));
+                                  const phase = getConvergencePhase(meterScore);
+                                  const phaseColor =
+                                    phase === "Diverging"
+                                      ? "text-red-600"
+                                      : phase === "Balanced"
+                                      ? "text-amber-600"
+                                      : "text-emerald-600";
+
+                                  return (
+                                    <>
+                                      <div className="flex items-center justify-between text-xs text-[#64748b] mb-1">
+                                        <span>
+                                          Convergence Meter
+                                          {message.convergent.maxRounds > 0 && (
+                                            <span>{` · Round ${message.convergent.round}/${message.convergent.maxRounds}`}</span>
+                                          )}
+                                        </span>
+                                        <span className={`font-semibold ${phaseColor}`}>
+                                          {phase} · {meterScore}%
+                                        </span>
+                                      </div>
+                                      <div className="relative h-3 rounded-full bg-[#e2e8f0] overflow-hidden">
+                                        <div
+                                          className={`h-full rounded-full transition-[width] duration-700 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                                            message.convergent.status === "running" ? "animate-pulse" : ""
+                                          }`}
+                                          style={{
+                                            width: `${meterScore}%`,
+                                            background:
+                                              meterScore < 40
+                                                ? "linear-gradient(90deg,#f97316,#ef4444)"
+                                                : meterScore < 75
+                                                ? "linear-gradient(90deg,#f59e0b,#fbbf24)"
+                                                : "linear-gradient(90deg,#10b981,#22c55e)",
+                                          }}
+                                        />
+                                        <div
+                                          className={`absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full border-2 border-white shadow transition-[left] duration-700 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                                            message.convergent.status === "running" ? "animate-pulse" : ""
+                                          }`}
+                                          style={{
+                                            left: `calc(${meterScore}% - 7px)`,
+                                            background:
+                                              meterScore < 40
+                                                ? "#ef4444"
+                                                : meterScore < 75
+                                                ? "#f59e0b"
+                                                : "#22c55e",
+                                          }}
+                                        />
+                                      </div>
+                                      <div className="mt-1.5 grid grid-cols-3 text-[10px] font-semibold uppercase tracking-wide">
+                                        <span
+                                          className={`text-left ${
+                                            phase === "Diverging" ? "text-red-600" : "text-[#94a3b8]"
+                                          }`}
+                                        >
+                                          Diverging
+                                        </span>
+                                        <span
+                                          className={`text-center ${
+                                            phase === "Balanced" ? "text-amber-600" : "text-[#94a3b8]"
+                                          }`}
+                                        >
+                                          Balanced
+                                        </span>
+                                        <span
+                                          className={`text-right ${
+                                            phase === "Converging" ? "text-emerald-600" : "text-[#94a3b8]"
+                                          }`}
+                                        >
+                                          Converging
+                                        </span>
+                                      </div>
+                                    </>
+                                  );
+                                })()}
+                              </div>
+
+                              {expandedConvergent[message.id] && (
+                                <div className="space-y-2">
+                                  {message.convergent.logs.length === 0 && (
+                                    <p className="text-xs text-[#64748b]">
+                                      Initializing judge and debaters...
+                                    </p>
+                                  )}
+
+                                  {message.convergent.logs.map((log) => (
+                                    <div
+                                      key={log.id}
+                                      className={`rounded-xl border px-3 py-2 shadow-sm ${
+                                        log.role === "judge"
+                                          ? "border-[#dbeafe] bg-[#eff6ff]"
+                                          : log.role === "debater_a"
+                                          ? "border-[#e2e8f0] bg-white"
+                                          : log.role === "debater_b"
+                                          ? "border-[#fee2e2] bg-[#fff5f5]"
+                                          : "border-[#dcfce7] bg-[#f0fdf4]"
+                                      }`}
+                                    >
+                                      <div className="mb-1 flex items-center justify-between text-[11px]">
+                                        <span className="font-semibold text-[#475569] uppercase tracking-wide">
+                                          {log.role === "judge"
+                                            ? "Judge"
+                                            : log.role === "debater_a"
+                                            ? "Debater A"
+                                            : log.role === "debater_b"
+                                            ? "Debater B"
+                                            : "Executor"}
+                                        </span>
+                                        <span className="text-[#94a3b8]">
+                                          {log.round > 0 ? `Round ${log.round}` : "Init"}
+                                        </span>
+                                      </div>
+                                      <div className="prose prose-sm max-w-none prose-headings:text-[#2d2d2d] prose-p:text-[#334155] prose-strong:text-[#1f2937] prose-code:bg-[#f3f4f6] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[#1f2937] prose-pre:text-gray-100">
+                                        <ReactMarkdown
+                                          remarkPlugins={[remarkMath, remarkGfm]}
+                                          rehypePlugins={[rehypeKatex]}
+                                        >
+                                          {preprocessLaTeX(log.content || "")}
+                                        </ReactMarkdown>
+                                      </div>
+                                    </div>
+                                  ))}
+
+                                  {message.convergent.clarifyingQuestions.length > 0 && (
+                                    <div className="rounded-lg border border-[#f59e0b]/30 bg-[#fffbeb] px-3 py-2">
+                                      <p className="text-xs font-semibold text-[#92400e] mb-1">
+                                        Clarifying Questions from Judge
+                                      </p>
+                                      <ul className="list-disc pl-4 space-y-0.5 text-sm text-[#78350f]">
+                                        {message.convergent.clarifyingQuestions.map((q, idx) => (
+                                          <li key={`${message.id}-q-${idx}`}>{q}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
+                                </div>
                               )}
                             </div>
                           </div>
                         )}
 
                         {(message.content || (!message.reasoning && !message.isStreaming)) && (
-                          <div className="bg-[#fffaf2] rounded-2xl rounded-tl-md overflow-hidden shadow-sm border border-[#e5e7eb]">
-                            <div className="px-4 py-2 border-b border-[#e5e7eb] bg-[#f9fafb] flex items-center gap-2">
-                              {message.isStreaming ? (
-                                <>
-                                  <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
-                                  <span className="text-sm font-medium text-[#4b5563]">Answer</span>
-                                </>
-                              ) : (
-                                <>
-                                  <svg className="w-4 h-4 text-[#76b900]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                  </svg>
-                                  <span className="text-sm font-medium text-[#4b5563]">Answer</span>
-                                </>
-                              )}
-                            </div>
-                            <div className="px-5 py-4">
+                          <div className="px-2 sm:px-3">
+                            <div className="max-w-3xl mx-auto">
                               <div className="prose prose-sm max-w-none prose-headings:text-[#2d2d2d] prose-p:text-[#374151] prose-strong:text-[#1f2937] prose-code:bg-[#f3f4f6] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[#1f2937] prose-pre:text-gray-100">
                                 <ReactMarkdown
                                   remarkPlugins={[remarkMath, remarkGfm]}
@@ -793,7 +1135,7 @@ export default function Home() {
                                   {preprocessLaTeX(message.content || "...")}
                                 </ReactMarkdown>
                                 {message.isStreaming && message.content && (
-                                  <span className="inline-block w-2 h-4 bg-[#2d2d2d]/50 animate-pulse ml-1" />
+                                  <span className="inline-block w-2 h-4 bg-[#2d2d2d]/50 animate-pulse ml-1 align-middle" />
                                 )}
                               </div>
                             </div>
@@ -809,7 +1151,7 @@ export default function Home() {
 
             {/* Chat input bar */}
             <div className="fixed bottom-0 right-0 p-4 bg-gradient-to-t from-[#fffaf2] to-transparent transition-all duration-200" style={{ left: sidebarWidth }}>
-              <div className="max-w-3xl mx-auto">
+              <div className="w-full max-w-5xl mx-auto px-2 sm:px-4">
                 <div className="bg-[#fffaf2] rounded-2xl border border-[#e5e7eb] shadow-sm overflow-hidden">
                   <div className="flex items-center gap-3 px-4 py-3">
                     <button className="p-1 rounded-md hover:bg-[#f3f4f6] transition-colors text-[#9ca3af] flex-shrink-0">
@@ -820,7 +1162,7 @@ export default function Home() {
                     <select
                       value={selectedModel}
                       onChange={(e) => handleModelChange(e.target.value as AgenticModel)}
-                      disabled={isLoading}
+                      disabled={isLoading || convergentEnabled}
                       className="h-8 rounded-lg border border-[#e5e7eb] bg-[#fffaf2] px-2 text-xs text-[#4b5563] outline-none focus:ring-2 focus:ring-[#7c6bf5]/30 disabled:opacity-60"
                     >
                       <option value="nemotron9b">Model: 9B (free)</option>
@@ -829,27 +1171,27 @@ export default function Home() {
                     <div className="inline-flex rounded-lg border border-[#e5e7eb] overflow-hidden flex-shrink-0">
                       <button
                         type="button"
-                        onClick={() => handleThinkingToggle(false)}
+                        onClick={() => handleConvergentToggle(false)}
                         disabled={isLoading}
                         className={`h-8 px-2 text-xs transition-colors ${
-                          !thinkingEnabled
+                          !convergentEnabled
                             ? "bg-[#2d2d2d] text-white"
                             : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
                         } disabled:opacity-60`}
                       >
-                        Not Thinking
+                        Convergent Off
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleThinkingToggle(true)}
+                        onClick={() => handleConvergentToggle(true)}
                         disabled={isLoading}
                         className={`h-8 px-2 text-xs transition-colors ${
-                          thinkingEnabled
+                          convergentEnabled
                             ? "bg-[#2d2d2d] text-white"
                             : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
                         } disabled:opacity-60`}
                       >
-                        Thinking
+                        Convergent On
                       </button>
                     </div>
                     <input
@@ -887,3 +1229,5 @@ export default function Home() {
     </div>
   );
 }
+
+
