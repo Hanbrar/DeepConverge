@@ -149,12 +149,18 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, debateType]);
 
-  // Keyboard shortcut: Ctrl+K for New Chat
+  // Keyboard shortcuts: Ctrl/Cmd+K for New Chat, Ctrl/Cmd+Alt+D for New Debate
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "k") {
         e.preventDefault();
         handleNewChat();
+        return;
+      }
+
+      if ((e.ctrlKey || e.metaKey) && e.altKey && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        handleNewDebate();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
@@ -168,6 +174,13 @@ export default function Home() {
     setInput("");
     setDebatePhase("setup");
     setMode("agentic");
+  };
+
+  const handleNewDebate = () => {
+    setMode("debate");
+    setDebatePhase("setup");
+    setDebateQuestion("");
+    setInput("");
   };
 
   const handleModeChange = (nextMode: Mode) => {
@@ -704,7 +717,7 @@ export default function Home() {
         </div>
 
         {/* New Chat button */}
-        <div className="px-3 mb-2">
+        <div className="px-3 mb-2 space-y-1">
           <button
             onClick={handleNewChat}
             className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[#f3f4f6] transition-colors text-sm text-[#4b5563]"
@@ -716,6 +729,19 @@ export default function Home() {
               <>
                 <span className="flex-1 text-left">New Chat</span>
                 <span className="text-[10px] text-[#9ca3af] font-medium">Ctrl K</span>
+              </>
+            )}
+          </button>
+          <button
+            onClick={handleNewDebate}
+            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[#f3f4f6] transition-colors text-sm text-[#4b5563]"
+          >
+            <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            {sidebarOpen && (
+              <>
+                <span className="flex-1 text-left">New Debate</span>
               </>
             )}
           </button>
@@ -756,9 +782,20 @@ export default function Home() {
         {isAgenticMode && (
           <div className="fixed top-4 right-4 z-30">
             <div className="rounded-xl border border-[#e5e7eb] bg-[#fffaf2]/95 backdrop-blur-sm shadow-sm px-3 py-2">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-[#9ca3af]">
-                Active Model
-              </p>
+              <div className="flex items-center gap-1.5 mb-1">
+                <span className="w-3.5 h-3.5 rounded overflow-hidden border border-[#d1d5db] bg-white flex items-center justify-center">
+                  <Image
+                    src="/nvidia_logo.png"
+                    alt="NVIDIA logo"
+                    width={14}
+                    height={14}
+                    className="object-contain"
+                  />
+                </span>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-[#9ca3af]">
+                  Active Model
+                </p>
+              </div>
               <p className="text-xs font-semibold text-[#2d2d2d]">
                 {AGENTIC_MODELS[activeModel].display}
               </p>
@@ -1146,28 +1183,11 @@ export default function Home() {
           <>
             <main className="flex-1 pb-32 px-4">
               <div className="w-full max-w-5xl mx-auto space-y-6 px-2 sm:px-4">
-                {/* Compact mode toggle */}
-                <div className="flex items-center justify-center gap-10 pt-6 mb-4">
-                  <button
-                    onClick={() => handleModeChange("agentic")}
-                    className={`text-sm pb-1 transition-all ${
-                      isAgenticMode
-                        ? "text-[#2d2d2d] font-semibold border-b-2 border-[#2d2d2d]"
-                        : "text-[#9ca3af] hover:text-[#6b7280]"
-                    }`}
-                  >
-                    Agentic Mode
-                  </button>
-                  <button
-                    onClick={() => handleModeChange("debate")}
-                    className={`text-sm pb-1 transition-all ${
-                      !isAgenticMode
-                        ? "text-[#2d2d2d] font-semibold border-b-2 border-[#2d2d2d]"
-                        : "text-[#9ca3af] hover:text-[#6b7280]"
-                    }`}
-                  >
-                    Debate Mode
-                  </button>
+                {/* Current mode label */}
+                <div className="flex items-center justify-center pt-6 mb-4">
+                  <span className="text-sm pb-1 text-[#2d2d2d] font-semibold border-b-2 border-[#2d2d2d]">
+                    {isAgenticMode ? "Agentic Mode" : "Debate Mode"}
+                  </span>
                 </div>
 
                 {/* Messages */}
