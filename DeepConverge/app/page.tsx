@@ -49,6 +49,8 @@ type PendingAttachment = {
   dataUrl: string;
 };
 
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
 const AGENTIC_MODELS: Record<AgenticModel, { label: string; display: string }> = {
   nemotron9b: {
     label: "NVIDIA: Nemotron Nano 9B V2 (free)",
@@ -74,6 +76,7 @@ export default function Home() {
   const [animatedConvergence, setAnimatedConvergence] = useState<Record<string, number>>({});
   const [copiedCodeKey, setCopiedCodeKey] = useState<string | null>(null);
   const [attachedFile, setAttachedFile] = useState<PendingAttachment | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [isDragActive, setIsDragActive] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const agenticPanelRef = useRef<HTMLDivElement>(null);
@@ -263,6 +266,7 @@ export default function Home() {
 
   const handleAttachClick = () => {
     if (isLoading) return;
+    setAttachmentError(null);
     imageInputRef.current?.click();
   };
 
@@ -280,6 +284,7 @@ export default function Home() {
     const isImage = file.type.startsWith("image/");
     const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
     if (!isImage && !isPdf) return null;
+    if (file.size > MAX_UPLOAD_BYTES) return null;
 
     const dataUrl = await fileToDataUrl(file);
     if (!dataUrl) return null;
@@ -294,7 +299,11 @@ export default function Home() {
 
   const attachFromFile = async (file: File) => {
     const attachment = await toPendingAttachment(file);
-    if (!attachment) return;
+    if (!attachment) {
+      setAttachmentError("Only image or PDF files up to 10MB are supported.");
+      return;
+    }
+    setAttachmentError(null);
     setAttachedFile(attachment);
   };
 
@@ -418,6 +427,7 @@ export default function Home() {
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setInput("");
     setAttachedFile(null);
+    setAttachmentError(null);
     setIsLoading(true);
 
     const abortController = new AbortController();
@@ -969,7 +979,10 @@ export default function Home() {
                         </div>
                         <button
                           type="button"
-                          onClick={() => setAttachedFile(null)}
+                          onClick={() => {
+                            setAttachedFile(null);
+                            setAttachmentError(null);
+                          }}
                           className="text-[#9ca3af] hover:text-[#6b7280] transition-colors"
                           aria-label="Remove attachment"
                         >
@@ -978,6 +991,13 @@ export default function Home() {
                           </svg>
                         </button>
                       </div>
+                    </div>
+                  )}
+                  {attachmentError && (
+                    <div className="px-4 pt-3">
+                      <p className="text-xs text-[#b45309] bg-[#fffbeb] border border-[#fde68a] rounded-lg px-3 py-2">
+                        {attachmentError}
+                      </p>
                     </div>
                   )}
                   <textarea
@@ -1514,7 +1534,10 @@ export default function Home() {
                         </div>
                         <button
                           type="button"
-                          onClick={() => setAttachedFile(null)}
+                          onClick={() => {
+                            setAttachedFile(null);
+                            setAttachmentError(null);
+                          }}
                           className="text-[#9ca3af] hover:text-[#6b7280] transition-colors"
                           aria-label="Remove attachment"
                         >
@@ -1523,6 +1546,13 @@ export default function Home() {
                           </svg>
                         </button>
                       </div>
+                    </div>
+                  )}
+                  {attachmentError && (
+                    <div className="px-4 pt-3">
+                      <p className="text-xs text-[#b45309] bg-[#fffbeb] border border-[#fde68a] rounded-lg px-3 py-2">
+                        {attachmentError}
+                      </p>
                     </div>
                   )}
                   <div className="px-4 pt-3 pb-2">

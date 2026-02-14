@@ -1,5 +1,7 @@
 import { NextRequest } from "next/server";
-import { inflateSync } from "zlib";
+import { createWorker, PSM } from "tesseract.js";
+
+export const runtime = "nodejs";
 
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -27,6 +29,13 @@ const CHAT_SYSTEM_PROMPT = [
 ].join(" ");
 
 const MAX_CONVERGENCE_ROUNDS = 4;
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const PDF_MAX_CHARS = 60000;
+const PDF_CHUNK_CHARS = 3800;
+const PDF_MAX_CHUNKS = 8;
+const PDF_OCR_MAX_PAGES = 8;
+const PDF_NATIVE_MAX_PAGES = 30;
+const PDF_OCR_RENDER_SCALE = 2;
 
 function isShortSocialMessage(text: string): boolean {
   const normalized = text.trim().toLowerCase();
@@ -38,6 +47,33 @@ function isShortSocialMessage(text: string): boolean {
 }
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function createDoneSseResponse(content: string) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({ type: "content", content })}\n\n`
+        )
+      );
+      controller.enqueue(
+        encoder.encode(
+          `data: ${JSON.stringify({ type: "done", reasoning: "", content })}\n\n`
+        )
+      );
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+}
 
 function extractText(value: unknown): string {
   if (typeof value === "string") return value;
@@ -159,112 +195,336 @@ function decodePdfDataUrl(dataUrl: string): Buffer | null {
   }
 }
 
-function decodePdfEscapedString(token: string): string {
-  return token
-    .replace(/\\([nrtbf()\\])/g, (_, ch: string) => {
-      const map: Record<string, string> = {
-        n: "\n",
-        r: "\r",
-        t: "\t",
-        b: "\b",
-        f: "\f",
-        "(": "(",
-        ")": ")",
-        "\\": "\\",
-      };
-      return map[ch] ?? ch;
-    })
-    .replace(/\\([0-7]{1,3})/g, (_, oct: string) =>
-      String.fromCharCode(parseInt(oct, 8))
-    );
+function decodeBase64DataUrlToBuffer(dataUrl: string): Buffer | null {
+  const commaIndex = dataUrl.indexOf(",");
+  if (commaIndex === -1) return null;
+  const base64 = dataUrl.slice(commaIndex + 1);
+  try {
+    return Buffer.from(base64, "base64");
+  } catch {
+    return null;
+  }
 }
 
-function extractPdfTextFromContent(content: string): string {
-  const chunks: string[] = [];
-  const directTextRe = /\((?:\\.|[^\\()])*\)\s*T[Jj]/g;
-
-  for (const match of content.matchAll(directTextRe)) {
-    const raw = match[0];
-    const literal = raw.slice(0, raw.lastIndexOf(")")).replace(/^\(/, "");
-    const decoded = decodePdfEscapedString(literal).trim();
-    if (decoded) chunks.push(decoded);
-  }
-
-  const tjArrayRe = /\[([\s\S]*?)\]\s*TJ/g;
-  for (const match of content.matchAll(tjArrayRe)) {
-    const body = match[1];
-    const literals = body.match(/\((?:\\.|[^\\()])*\)/g) || [];
-    const decoded = literals
-      .map((lit) => decodePdfEscapedString(lit.slice(1, -1)))
-      .join("")
-      .trim();
-    if (decoded) chunks.push(decoded);
-  }
-
-  return chunks.join("\n");
+function normalizePdfExtractedText(text: string): string {
+  return text
+    .replace(/\u0000/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[^\S\n]{2,}/g, " ")
+    .trim();
 }
 
-function extractPdfText(data: Buffer): string {
-  const latin = data.toString("latin1");
-  const parts: string[] = [];
+async function extractPdfTextNative(data: Buffer): Promise<{
+  text: string;
+  pageCount: number;
+  warning?: string;
+}> {
+  let loadedPdf: { destroy: () => Promise<void> } | null = null;
+  try {
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const loadingTask = pdfjs.getDocument({
+      data: new Uint8Array(data),
+      isEvalSupported: false,
+      useSystemFonts: true,
+      disableFontFace: true,
+    });
+    const pdf = await loadingTask.promise;
+    loadedPdf = pdf as unknown as { destroy: () => Promise<void> };
 
-  const direct = extractPdfTextFromContent(latin);
-  if (direct) parts.push(direct);
-
-  let cursor = 0;
-  while (true) {
-    const streamKeyIndex = latin.indexOf("stream", cursor);
-    if (streamKeyIndex === -1) break;
-
-    const streamStartMatch = latin
-      .slice(streamKeyIndex)
-      .match(/^stream\r?\n/);
-    if (!streamStartMatch) {
-      cursor = streamKeyIndex + 6;
-      continue;
+    const pagesToProcess = Math.min(pdf.numPages, PDF_NATIVE_MAX_PAGES);
+    if (pagesToProcess <= 0) {
+      await pdf.destroy();
+      loadedPdf = null;
+      return { text: "", pageCount: 0, warning: "This PDF has no pages." };
     }
 
-    const start = streamKeyIndex + streamStartMatch[0].length;
-    const end = latin.indexOf("endstream", start);
-    if (end === -1) break;
+    const pages: string[] = [];
+    for (let pageNum = 1; pageNum <= pagesToProcess; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const textContent = await page.getTextContent();
+      const items = textContent.items as Array<{ str?: string; hasEOL?: boolean }>;
 
-    const dictStart = Math.max(0, latin.lastIndexOf("<<", streamKeyIndex));
-    const dictEnd = latin.indexOf(">>", dictStart);
-    const dict =
-      dictStart !== -1 && dictEnd !== -1 && dictEnd < streamKeyIndex
-        ? latin.slice(dictStart, dictEnd + 2)
-        : "";
+      let pageText = "";
+      for (const item of items) {
+        if (typeof item.str === "string") {
+          pageText += item.str;
+          if (item.hasEOL) pageText += "\n";
+        }
+      }
 
-    const slice = data.subarray(start, end);
-    if (dict.includes("/FlateDecode")) {
+      const cleaned = pageText.trim();
+      if (cleaned) {
+        pages.push(`[Page ${pageNum}] ${cleaned}`);
+      }
+      page.cleanup();
+    }
+
+    const fullText = normalizePdfExtractedText(pages.join("\n\n"));
+    await pdf.destroy();
+    loadedPdf = null;
+
+    return {
+      text: fullText,
+      pageCount: pdf.numPages,
+      warning:
+        pdf.numPages > pagesToProcess
+          ? `Only the first ${pagesToProcess} of ${pdf.numPages} pages were extracted.`
+          : undefined,
+    };
+  } catch (err) {
+    console.error("Native PDF extraction error:", err);
+    return { text: "", pageCount: 0, warning: "Native text extraction failed." };
+  } finally {
+    if (loadedPdf) {
       try {
-        const inflated = inflateSync(slice).toString("latin1");
-        const text = extractPdfTextFromContent(inflated);
-        if (text) parts.push(text);
+        await loadedPdf.destroy();
       } catch {
-        // Ignore unreadable compressed streams.
+        // Ignore cleanup errors.
       }
     }
-
-    cursor = end + 9;
   }
-
-  const merged = parts.join("\n").replace(/[^\x09\x0A\x0D\x20-\x7E]/g, " ").trim();
-  return merged;
 }
 
-function buildPdfAugmentedTask(userMessage: string, pdfExtract: string): string {
+async function extractPdfTextWithOcr(data: Buffer): Promise<{
+  text: string;
+  warning?: string;
+}> {
+  let worker: Awaited<ReturnType<typeof createWorker>> | null = null;
+  let loadedPdf: { destroy: () => Promise<void> } | null = null;
+
+  try {
+    const { createCanvas } = await import("@napi-rs/canvas");
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const loadingTask = pdfjs.getDocument({
+      data: new Uint8Array(data),
+      isEvalSupported: false,
+      useSystemFonts: true,
+      disableFontFace: true,
+    });
+    const pdf = await loadingTask.promise;
+    loadedPdf = pdf as { destroy: () => Promise<void> };
+
+    const pagesToProcess = Math.min(pdf.numPages, PDF_OCR_MAX_PAGES);
+    if (pagesToProcess <= 0) {
+      await pdf.destroy();
+      loadedPdf = null;
+      return {
+        text: "",
+        warning: "This PDF has no pages to process.",
+      };
+    }
+
+    worker = await createWorker("eng", undefined, {
+      logger: () => {
+        // Keep OCR logs out of normal server output.
+      },
+    });
+    await worker.setParameters({
+      tessedit_pageseg_mode: PSM.AUTO,
+      preserve_interword_spaces: "1",
+    });
+
+    const pages: string[] = [];
+    for (let pageNum = 1; pageNum <= pagesToProcess; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const viewport = page.getViewport({ scale: PDF_OCR_RENDER_SCALE });
+      const width = Math.max(1, Math.floor(viewport.width));
+      const height = Math.max(1, Math.floor(viewport.height));
+      const canvas = createCanvas(width, height);
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, width, height);
+      await page.render({
+        canvasContext: context as unknown as CanvasRenderingContext2D,
+        viewport,
+        canvas: canvas as unknown as HTMLCanvasElement,
+      }).promise;
+
+      const png = canvas.toBuffer("image/png");
+      const ocrResult = await worker.recognize(png);
+      const pageText = normalizePdfExtractedText(ocrResult.data.text || "");
+      if (pageText) {
+        pages.push(`[Page ${pageNum}] ${pageText}`);
+      }
+      page.cleanup();
+    }
+
+    await pdf.destroy();
+    loadedPdf = null;
+    await worker.terminate();
+    worker = null;
+
+    return {
+      text: normalizePdfExtractedText(pages.join("\n\n")),
+      warning:
+        pdf.numPages > pagesToProcess
+          ? `Only the first ${pagesToProcess} pages were OCR-processed to keep latency reasonable.`
+          : undefined,
+    };
+  } catch (err) {
+    console.error("PDF OCR extraction error:", err);
+    return {
+      text: "",
+      warning: `OCR could not extract readable text from this PDF.${err instanceof Error ? ` (${err.message})` : ""}`,
+    };
+  } finally {
+    if (worker) {
+      try {
+        await worker.terminate();
+      } catch {
+        // Ignore worker shutdown errors.
+      }
+    }
+    if (loadedPdf) {
+      try {
+        await loadedPdf.destroy();
+      } catch {
+        // Ignore PDF shutdown errors.
+      }
+    }
+  }
+}
+
+function hasMeaningfulPdfText(text: string): boolean {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (compact.length < 80) return false;
+  const words = compact.match(/[A-Za-z0-9][A-Za-z0-9'-]*/g) || [];
+  const letters = compact.match(/[A-Za-z]/g) || [];
+  const noisyRuns = compact.match(/[^\w\s]{4,}/g) || [];
+  if (words.length < 12) return false;
+  if (letters.length < 30) return false;
+  if (noisyRuns.length > 20) return false;
+  return true;
+}
+
+async function extractPdfText(data: Buffer): Promise<{
+  text: string;
+  method: "native" | "ocr";
+  warning?: string;
+}> {
+  // Step 1: Try native text extraction (fast, works for digital PDFs)
+  const native = await extractPdfTextNative(data);
+  if (hasMeaningfulPdfText(native.text)) {
+    return { text: native.text, method: "native", warning: native.warning };
+  }
+
+  // Step 2: Fall back to OCR (slower, for scanned/image PDFs)
+  console.log(
+    `Native extraction yielded ${native.text.length} chars (insufficient). Falling back to OCR.`
+  );
+  const ocr = await extractPdfTextWithOcr(data);
+  if (hasMeaningfulPdfText(ocr.text)) {
+    return { text: ocr.text, method: "ocr", warning: ocr.warning };
+  }
+
+  // Step 3: If OCR also failed but native had SOME text, use it anyway
+  if (native.text.trim().length > 20) {
+    return {
+      text: native.text,
+      method: "native",
+      warning: "Text quality is low; results may be incomplete.",
+    };
+  }
+
+  return {
+    text: "",
+    method: "ocr",
+    warning: ocr.warning || native.warning || "No readable text could be extracted.",
+  };
+}
+
+function chunkText(source: string, chunkSize: number) {
+  const chunks: string[] = [];
+  let cursor = 0;
+  while (cursor < source.length) {
+    chunks.push(source.slice(cursor, cursor + chunkSize));
+    cursor += chunkSize;
+  }
+  return chunks;
+}
+
+async function summarizePdfForTask(params: {
+  apiKey: string;
+  model: string;
+  userMessage: string;
+  extractedText: string;
+}) {
+  const trimmed = params.extractedText.trim();
+  if (!trimmed) {
+    return "No readable PDF text was extracted. Ask the user for a clearer PDF or pasted excerpt.";
+  }
+
+  const capped = trimmed.slice(0, PDF_MAX_CHARS);
+  const chunks = chunkText(capped, PDF_CHUNK_CHARS).slice(0, PDF_MAX_CHUNKS);
+  const partials: string[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkSummary = await completeOnce({
+      apiKey: params.apiKey,
+      model: params.model,
+      temperature: 0.2,
+      maxTokens: 550,
+      reasoning: { effort: "none", exclude: true },
+      messages: [
+        {
+          role: "system",
+          content:
+            "You summarize document chunks for downstream task execution. Keep only facts, key points, entities, numbers, and actionable details relevant to the user request.",
+        },
+        {
+          role: "user",
+          content: [
+            `User request: ${params.userMessage || "Summarize this PDF."}`,
+            `Chunk ${i + 1}/${chunks.length}:`,
+            chunks[i],
+            "Return compact bullets only.",
+          ].join("\n\n"),
+        },
+      ],
+    });
+    partials.push(chunkSummary);
+  }
+
+  if (partials.length === 1) return partials[0];
+
+  return completeOnce({
+    apiKey: params.apiKey,
+    model: params.model,
+    temperature: 0.2,
+    maxTokens: 750,
+    reasoning: { effort: "none", exclude: true },
+    messages: [
+      {
+        role: "system",
+        content:
+          "Merge partial PDF summaries into one concise structured brief: key facts, constraints, and useful action items aligned to the user request.",
+      },
+      {
+        role: "user",
+        content: [
+          `User request: ${params.userMessage || "Summarize this PDF."}`,
+          "Partial summaries:",
+          partials.join("\n\n"),
+          "Return a compact summary with clear sections.",
+        ].join("\n\n"),
+      },
+    ],
+  });
+}
+
+function buildPdfAugmentedTask(userMessage: string, pdfSummary: string) {
   const normalizedTask = userMessage.trim() || "Analyze the uploaded PDF and help the user.";
-  const extracted =
-    pdfExtract.trim() ||
-    "No readable text could be extracted from the PDF. Ask the user for a text snippet or clearer source.";
+  const summary =
+    pdfSummary.trim() ||
+    "No readable PDF summary available. Ask the user for key excerpts.";
   return [
     `User request: ${normalizedTask}`,
-    "Document context: The uploaded PDF was parsed for textual content.",
-    "Use the extracted document text as primary context and answer accurately.",
+    "Document context: The uploaded PDF was OCR-processed and summarized in chunks.",
+    "Use this summarized document context as primary evidence and answer accurately.",
     "",
-    "Extracted PDF text:",
-    extracted.slice(0, 6000),
+    "Summarized PDF context:",
+    summary.slice(0, 6000),
   ].join("\n");
 }
 
@@ -367,12 +627,34 @@ export async function POST(request: NextRequest) {
       typeof body?.pdfDataUrl === "string" ? body.pdfDataUrl.trim() : "";
     const hasImage = imageDataUrlRaw.startsWith("data:image/");
     const hasPdf = pdfDataUrlRaw.startsWith("data:application/pdf");
+    const imageBuffer = hasImage ? decodeBase64DataUrlToBuffer(imageDataUrlRaw) : null;
+    const pdfBuffer = hasPdf ? decodePdfDataUrl(pdfDataUrlRaw) : null;
 
     if (!message && !hasImage && !hasPdf) {
       return new Response(JSON.stringify({ error: "Message is required" }), {
         status: 400,
         headers: { "Content-Type": "application/json" },
       });
+    }
+
+    if (hasImage && (!imageBuffer || imageBuffer.length > MAX_UPLOAD_BYTES)) {
+      return new Response(
+        JSON.stringify({ error: "Image upload is invalid or exceeds 10MB limit." }),
+        {
+          status: 413,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    if (hasPdf && (!pdfBuffer || pdfBuffer.length > MAX_UPLOAD_BYTES)) {
+      return new Response(
+        JSON.stringify({ error: "PDF upload is invalid or exceeds 10MB limit." }),
+        {
+          status: 413,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
     }
 
     const apiKey = process.env.OPENROUTER_API_KEY;
@@ -436,11 +718,34 @@ export async function POST(request: NextRequest) {
             if (hasPdf) {
               send({
                 type: "status",
-                content: "Analyzing PDF.",
+                content: "Extracting text from PDF...",
               });
-              const pdfBuffer = decodePdfDataUrl(pdfDataUrlRaw);
-              const pdfExtract = pdfBuffer ? extractPdfText(pdfBuffer) : "";
-              taskMessage = buildPdfAugmentedTask(taskMessage, pdfExtract);
+              const extraction = pdfBuffer
+                ? await extractPdfText(pdfBuffer)
+                : { text: "", method: "native" as const, warning: "Invalid PDF payload." };
+              if (!extraction.text.trim()) {
+                const failMessage = [
+                  "I could not extract readable text from this PDF.",
+                  extraction.warning || "",
+                  "Please upload a clearer PDF or paste the relevant text excerpt.",
+                ].join(" ").trim();
+                send({ type: "status", content: "PDF extraction failed." });
+                send({ type: "content", content: failMessage });
+                send({ type: "done", reasoning: "", content: failMessage });
+                safeClose();
+                return;
+              }
+              send({
+                type: "status",
+                content: `PDF text extracted (${extraction.method}). Summarizing for convergent reasoning...`,
+              });
+              const pdfSummary = await summarizePdfForTask({
+                apiKey,
+                model: convergentModel,
+                userMessage: rawTask,
+                extractedText: extraction.text,
+              });
+              taskMessage = buildPdfAugmentedTask(taskMessage, pdfSummary);
             }
 
             if (!hasImage && !hasPdf && isShortSocialMessage(rawTask)) {
@@ -763,9 +1068,25 @@ export async function POST(request: NextRequest) {
     }
 
     if (hasPdf) {
-      const pdfBuffer = decodePdfDataUrl(pdfDataUrlRaw);
-      const pdfExtract = pdfBuffer ? extractPdfText(pdfBuffer) : "";
-      nonConvergentTask = buildPdfAugmentedTask(nonConvergentTask, pdfExtract);
+      const extraction = pdfBuffer
+        ? await extractPdfText(pdfBuffer)
+        : { text: "", method: "native" as const, warning: "Invalid PDF payload." };
+      if (!extraction.text.trim()) {
+        return createDoneSseResponse(
+          [
+            "I could not extract readable text from this PDF.",
+            extraction.warning || "",
+            "Please upload a clearer PDF or paste the relevant text excerpt.",
+          ].join(" ").trim()
+        );
+      }
+      const pdfSummary = await summarizePdfForTask({
+        apiKey,
+        model: MODEL_IDS[resolvedModel],
+        userMessage: rawTask,
+        extractedText: extraction.text,
+      });
+      nonConvergentTask = buildPdfAugmentedTask(nonConvergentTask, pdfSummary);
     }
 
     // Instant UX for simple social pings in non-convergent chat mode.
