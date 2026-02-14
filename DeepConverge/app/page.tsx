@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import Image from "next/image";
 import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
 import remarkMath from "remark-math";
 import remarkGfm from "remark-gfm";
 import rehypeKatex from "rehype-katex";
@@ -56,10 +57,10 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<AgenticModel>("nemotron9b");
   const [convergentEnabled, setConvergentEnabled] = useState(false);
   const [expandedConvergent, setExpandedConvergent] = useState<Record<string, boolean>>({});
   const [animatedConvergence, setAnimatedConvergence] = useState<Record<string, number>>({});
+  const [copiedCodeKey, setCopiedCodeKey] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const agenticPanelRef = useRef<HTMLDivElement>(null);
   const debatePanelRef = useRef<HTMLDivElement>(null);
@@ -155,14 +156,72 @@ export default function Home() {
     setMode(nextMode);
   };
 
-  const handleModelChange = (model: AgenticModel) => {
-    setSelectedModel(model);
-  };
+  const activeModel: AgenticModel = convergentEnabled ? "nemotron30b" : "nemotron9b";
 
   const handleConvergentToggle = (enabled: boolean) => {
     setConvergentEnabled(enabled);
-    setSelectedModel(enabled ? "nemotron30b" : "nemotron9b");
   };
+
+  const markdownComponents: Components = {
+    code({ className, children, ...props }) {
+      const languageMatch = /language-([\w-]+)/.exec(className || "");
+      const codeText = String(children || "").replace(/\n$/, "");
+
+      if (!languageMatch) {
+        return (
+          <code className={`${className || ""} bg-[#f3f4f6] px-1 py-0.5 rounded`} {...props}>
+            {children}
+          </code>
+        );
+      }
+
+      const language = languageMatch[1].toLowerCase();
+      const codeKey = `${language}-${codeText.slice(0, 80)}`;
+      const copied = copiedCodeKey === codeKey;
+
+      return (
+        <div className="not-prose my-3 overflow-hidden rounded-xl border border-[#d1d5db] bg-[#0f172a]">
+          <div className="flex items-center justify-between px-3 py-1.5 text-[11px] bg-[#111827] border-b border-[#1f2937]">
+            <span className="font-semibold uppercase tracking-wide text-[#9ca3af]">
+              {language}
+            </span>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(codeText);
+                  setCopiedCodeKey(codeKey);
+                  setTimeout(() => {
+                    setCopiedCodeKey((prev) => (prev === codeKey ? null : prev));
+                  }, 1200);
+                } catch {
+                  // Clipboard may be unavailable in some browsers.
+                }
+              }}
+              className="rounded-md border border-[#374151] px-2 py-0.5 text-[#d1d5db] hover:bg-[#1f2937] transition-colors"
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <pre className="m-0 overflow-x-auto p-3 text-sm text-[#e5e7eb]">
+            <code className={className} {...props}>
+              {codeText}
+            </code>
+          </pre>
+        </div>
+      );
+    },
+  };
+
+  const renderMarkdown = (content: string) => (
+    <ReactMarkdown
+      remarkPlugins={[remarkMath, remarkGfm]}
+      rehypePlugins={[rehypeKatex]}
+      components={markdownComponents}
+    >
+      {preprocessLaTeX(content)}
+    </ReactMarkdown>
+  );
 
   // ── Chat logic (unchanged) ───────────────────────────────────────────
   const sendMessage = async () => {
@@ -205,7 +264,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: input.trim(),
-          model: selectedModel,
+          model: activeModel,
           thinking: convergentEnabled,
           convergentThinking: convergentEnabled,
         }),
@@ -503,10 +562,10 @@ export default function Home() {
                 Active Model
               </p>
               <p className="text-xs font-semibold text-[#2d2d2d]">
-                {AGENTIC_MODELS[selectedModel].display}
+                {AGENTIC_MODELS[activeModel].display}
               </p>
               <p className="text-[11px] text-[#6b7280]">
-                Convergent Thinking: {convergentEnabled ? "On" : "Off"}
+                ConvergentThinking {convergentEnabled ? "On" : "Off"}
               </p>
             </div>
           </div>
@@ -667,44 +726,22 @@ export default function Home() {
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                         </svg>
                       </button>
-                      <select
-                        value={selectedModel}
-                        onChange={(e) => handleModelChange(e.target.value as AgenticModel)}
-                        disabled={isLoading || convergentEnabled}
+                      <button
+                        type="button"
+                        onClick={() => handleConvergentToggle(!convergentEnabled)}
+                        disabled={isLoading}
                         tabIndex={isAgenticMode ? 0 : -1}
-                        className="h-8 rounded-lg border border-[#e5e7eb] bg-[#fffaf2] px-2 text-xs text-[#4b5563] outline-none focus:ring-2 focus:ring-[#7c6bf5]/30 disabled:opacity-60"
+                        className={`h-8 px-3 rounded-lg border text-xs font-medium transition-colors ${
+                          convergentEnabled
+                            ? "bg-[#2d2d2d] border-[#2d2d2d] text-white"
+                            : "bg-[#fffaf2] border-[#e5e7eb] text-[#6b7280] hover:bg-[#f3f4f6]"
+                        } disabled:opacity-60`}
                       >
-                        <option value="nemotron9b">Model: 9B (free)</option>
-                        <option value="nemotron30b">Model: 30B</option>
-                      </select>
-                      <div className="inline-flex rounded-lg border border-[#e5e7eb] overflow-hidden">
-                        <button
-                          type="button"
-                          onClick={() => handleConvergentToggle(false)}
-                          disabled={isLoading}
-                          tabIndex={isAgenticMode ? 0 : -1}
-                          className={`h-8 px-2 text-xs transition-colors ${
-                            !convergentEnabled
-                              ? "bg-[#2d2d2d] text-white"
-                              : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
-                          } disabled:opacity-60`}
-                        >
-                          Convergent Off
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleConvergentToggle(true)}
-                          disabled={isLoading}
-                          tabIndex={isAgenticMode ? 0 : -1}
-                          className={`h-8 px-2 text-xs transition-colors ${
-                            convergentEnabled
-                              ? "bg-[#2d2d2d] text-white"
-                              : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
-                          } disabled:opacity-60`}
-                        >
-                          Convergent On
-                        </button>
-                      </div>
+                        ConvergentThinking {convergentEnabled ? "On" : "Off"}
+                      </button>
+                      <span className="text-[11px] text-[#6b7280]">
+                        Active: {convergentEnabled ? "30B" : "9B"}
+                      </span>
                     </div>
                     <button
                       onClick={sendMessage}
@@ -899,7 +936,7 @@ export default function Home() {
                         </div>
                       </div>
                     ) : (
-                      <div className="space-y-3">
+                      <div className="space-y-3 max-w-3xl">
                         <div className="flex items-center gap-2 text-xs text-[#76b900]">
                           <span className="w-4 h-4 rounded overflow-hidden border border-[#d1d5db] bg-white flex items-center justify-center">
                             <Image
@@ -932,12 +969,7 @@ export default function Home() {
                             </div>
                             <div className="px-4 py-3">
                               <div className="prose prose-sm max-w-none prose-headings:text-[#2d2d2d] prose-p:text-[#374151] prose-strong:text-[#1f2937] prose-code:bg-[#f3f4f6] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[#1f2937] prose-pre:text-gray-100">
-                                <ReactMarkdown
-                                  remarkPlugins={[remarkMath, remarkGfm]}
-                                  rehypePlugins={[rehypeKatex]}
-                                >
-                                  {preprocessLaTeX(message.reasoning || "")}
-                                </ReactMarkdown>
+                                {renderMarkdown(message.reasoning || "")}
                               </div>
                               {message.isStreaming && !message.content && (
                                 <span className="inline-block w-2 h-4 bg-[#4b5563]/50 animate-pulse ml-1 align-middle" />
@@ -1096,12 +1128,7 @@ export default function Home() {
                                         </span>
                                       </div>
                                       <div className="prose prose-sm max-w-none prose-headings:text-[#2d2d2d] prose-p:text-[#334155] prose-strong:text-[#1f2937] prose-code:bg-[#f3f4f6] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[#1f2937] prose-pre:text-gray-100">
-                                        <ReactMarkdown
-                                          remarkPlugins={[remarkMath, remarkGfm]}
-                                          rehypePlugins={[rehypeKatex]}
-                                        >
-                                          {preprocessLaTeX(log.content || "")}
-                                        </ReactMarkdown>
+                                        {renderMarkdown(log.content || "")}
                                       </div>
                                     </div>
                                   ))}
@@ -1126,18 +1153,11 @@ export default function Home() {
 
                         {(message.content || (!message.reasoning && !message.isStreaming)) && (
                           <div className="px-2 sm:px-3">
-                            <div className="max-w-3xl mx-auto">
-                              <div className="prose prose-sm max-w-none prose-headings:text-[#2d2d2d] prose-p:text-[#374151] prose-strong:text-[#1f2937] prose-code:bg-[#f3f4f6] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[#1f2937] prose-pre:text-gray-100">
-                                <ReactMarkdown
-                                  remarkPlugins={[remarkMath, remarkGfm]}
-                                  rehypePlugins={[rehypeKatex]}
-                                >
-                                  {preprocessLaTeX(message.content || "...")}
-                                </ReactMarkdown>
-                                {message.isStreaming && message.content && (
-                                  <span className="inline-block w-2 h-4 bg-[#2d2d2d]/50 animate-pulse ml-1 align-middle" />
-                                )}
-                              </div>
+                            <div className="prose prose-sm max-w-none prose-headings:text-[#2d2d2d] prose-p:text-[#374151] prose-strong:text-[#1f2937] prose-code:bg-[#f3f4f6] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[#1f2937] prose-pre:text-gray-100">
+                              {renderMarkdown(message.content || "...")}
+                              {message.isStreaming && message.content && (
+                                <span className="inline-block w-2 h-4 bg-[#2d2d2d]/50 animate-pulse ml-1 align-middle" />
+                              )}
                             </div>
                           </div>
                         )}
@@ -1153,72 +1173,61 @@ export default function Home() {
             <div className="fixed bottom-0 right-0 p-4 bg-gradient-to-t from-[#fffaf2] to-transparent transition-all duration-200" style={{ left: sidebarWidth }}>
               <div className="w-full max-w-5xl mx-auto px-2 sm:px-4">
                 <div className="bg-[#fffaf2] rounded-2xl border border-[#e5e7eb] shadow-sm overflow-hidden">
-                  <div className="flex items-center gap-3 px-4 py-3">
+                  <div className="px-4 pt-3 pb-2">
+                    <div className="flex items-end gap-3">
+                      <textarea
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            sendMessage();
+                          }
+                        }}
+                        placeholder="Ask anything..."
+                        className="min-h-[42px] max-h-40 w-full bg-transparent outline-none text-[#2d2d2d] placeholder-[#9ca3af] text-[15px] leading-6 resize-none overflow-y-auto whitespace-pre-wrap break-words"
+                        rows={2}
+                        disabled={isLoading}
+                      />
+                      <button
+                        onClick={sendMessage}
+                        disabled={!input.trim() || isLoading}
+                        className="w-8 h-8 mb-1 rounded-full bg-[#7c6bf5] text-white flex items-center justify-center hover:bg-[#6c5ce7] transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+                      >
+                        {isLoading ? (
+                          <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                        ) : (
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
+                          </svg>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 px-4 pb-3">
                     <button className="p-1 rounded-md hover:bg-[#f3f4f6] transition-colors text-[#9ca3af] flex-shrink-0">
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                       </svg>
                     </button>
-                    <select
-                      value={selectedModel}
-                      onChange={(e) => handleModelChange(e.target.value as AgenticModel)}
-                      disabled={isLoading || convergentEnabled}
-                      className="h-8 rounded-lg border border-[#e5e7eb] bg-[#fffaf2] px-2 text-xs text-[#4b5563] outline-none focus:ring-2 focus:ring-[#7c6bf5]/30 disabled:opacity-60"
-                    >
-                      <option value="nemotron9b">Model: 9B (free)</option>
-                      <option value="nemotron30b">Model: 30B</option>
-                    </select>
-                    <div className="inline-flex rounded-lg border border-[#e5e7eb] overflow-hidden flex-shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleConvergentToggle(false)}
-                        disabled={isLoading}
-                        className={`h-8 px-2 text-xs transition-colors ${
-                          !convergentEnabled
-                            ? "bg-[#2d2d2d] text-white"
-                            : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
-                        } disabled:opacity-60`}
-                      >
-                        Convergent Off
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleConvergentToggle(true)}
-                        disabled={isLoading}
-                        className={`h-8 px-2 text-xs transition-colors ${
-                          convergentEnabled
-                            ? "bg-[#2d2d2d] text-white"
-                            : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
-                        } disabled:opacity-60`}
-                      >
-                        Convergent On
-                      </button>
-                    </div>
-                    <input
-                      type="text"
-                      value={input}
-                      onChange={(e) => setInput(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
-                      placeholder="Ask anything..."
-                      className="flex-1 bg-transparent outline-none text-[#2d2d2d] placeholder-[#9ca3af] text-[15px]"
-                      disabled={isLoading}
-                    />
                     <button
-                      onClick={sendMessage}
-                      disabled={!input.trim() || isLoading}
-                      className="w-8 h-8 rounded-full bg-[#7c6bf5] text-white flex items-center justify-center hover:bg-[#6c5ce7] transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+                      type="button"
+                      onClick={() => handleConvergentToggle(!convergentEnabled)}
+                      disabled={isLoading}
+                      className={`h-8 px-3 rounded-lg border text-xs font-medium transition-colors flex-shrink-0 ${
+                        convergentEnabled
+                          ? "bg-[#2d2d2d] border-[#2d2d2d] text-white"
+                          : "bg-[#fffaf2] border-[#e5e7eb] text-[#6b7280] hover:bg-[#f3f4f6]"
+                      } disabled:opacity-60`}
                     >
-                      {isLoading ? (
-                        <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                        </svg>
-                      ) : (
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
-                        </svg>
-                      )}
+                      ConvergentThinking {convergentEnabled ? "On" : "Off"}
                     </button>
+                    <span className="text-[11px] text-[#6b7280]">
+                      Active: {convergentEnabled ? "30B" : "9B"}
+                    </span>
                   </div>
                 </div>
               </div>

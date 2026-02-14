@@ -17,12 +17,25 @@ const CHAT_SYSTEM_PROMPT = [
   "You are DeepConverge, a productivity-focused AI assistant.",
   "This is a live chat UX: default to concise, practical, and context-aware answers.",
   "For short greetings or social pings (e.g., 'hey', 'hi', 'thanks'), respond in one short sentence.",
+  "If user intent is unclear, ask one clarifying question instead of inventing a task.",
+  "Do not output code unless the user explicitly asks for code or asks to modify code.",
   "Avoid dictionary-style breakdowns unless asked.",
   "Prioritize direct execution guidance, clear structure, and next steps.",
   "Do not expose private chain-of-thought.",
 ].join(" ");
 
 const MAX_CONVERGENCE_ROUNDS = 4;
+
+function isShortSocialMessage(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return true;
+  if (normalized.length > 60) return false;
+  return /^(hi|hello|hey|yo|sup|what'?s up|thanks|thank you|ok|okay|cool|nice|good (morning|afternoon|evening)|how are you)[!,.?\s]*$/.test(
+    normalized
+  );
+}
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function extractText(value: unknown): string {
   if (typeof value === "string") return value;
@@ -161,9 +174,6 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const message = typeof body?.message === "string" ? body.message.trim() : "";
-    const requestedModel =
-      typeof body?.model === "string" ? (body.model as ChatModel) : undefined;
-    const thinkingRequested = body?.thinking === true;
     const convergentThinking = body?.convergentThinking === true;
 
     if (!message) {
@@ -181,12 +191,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const resolvedModel: ChatModel =
-      requestedModel && requestedModel in MODEL_IDS
-        ? requestedModel
-        : thinkingRequested
-        ? "nemotron30b"
-        : "nemotron9b";
+    // Product rule: Convergent Off -> 9B chat model, Convergent On -> 30B workflow model.
+    const resolvedModel: ChatModel = convergentThinking ? "nemotron30b" : "nemotron9b";
 
     if (convergentThinking) {
       const encoder = new TextEncoder();
@@ -219,6 +225,48 @@ export async function POST(request: NextRequest) {
 
           try {
             const convergentModel = MODEL_IDS.nemotron30b;
+
+            if (isShortSocialMessage(message)) {
+              send({
+                type: "convergent_start",
+                round: 0,
+                maxRounds: 0,
+                score: 100,
+                status: "converged",
+              });
+
+              finalContent =
+                (await completeOnce({
+                  apiKey,
+                  model: convergentModel,
+                  temperature: 0.3,
+                  maxTokens: 120,
+                  reasoning: { effort: "none", exclude: true },
+                  messages: [
+                    {
+                      role: "system",
+                      content: CHAT_SYSTEM_PROMPT,
+                    },
+                    {
+                      role: "user",
+                      content: message,
+                    },
+                  ],
+                })) || "Hey - how can I help?";
+
+              send({
+                type: "convergence_state",
+                round: 0,
+                maxRounds: 0,
+                score: 100,
+                status: "converged",
+              });
+              send({ type: "content", content: finalContent });
+              send({ type: "done", reasoning: "", content: finalContent });
+              safeClose();
+              return;
+            }
+
             send({
               type: "convergent_start",
               round: 0,
@@ -233,11 +281,11 @@ export async function POST(request: NextRequest) {
               temperature: 0.3,
               maxTokens: 350,
               reasoning: { effort: "none", exclude: true },
-              messages: [
-                {
-                  role: "system",
-                  content:
-                    "You are the Judge in a convergent-thinking multi-agent workflow. State the task framing, evaluation criteria, and convergence target in 3 concise bullets.",
+                messages: [
+                  {
+                    role: "system",
+                    content:
+                      "You are the Judge in a convergent-thinking multi-agent workflow. State task framing, evaluation criteria, and convergence target in 3 concise bullets. Keep this productivity-focused and avoid code unless explicitly requested.",
                 },
                 {
                   role: "user",
@@ -280,7 +328,7 @@ export async function POST(request: NextRequest) {
                   {
                     role: "system",
                     content:
-                      "You are Debater A. Produce a concise, practical proposal for the task. Focus on execution and measurable outcomes.",
+                      "You are Debater A. Produce a concise, practical proposal focused on execution and measurable outcomes. Do not generate code unless explicitly requested.",
                   },
                   {
                     role: "user",
@@ -306,7 +354,7 @@ export async function POST(request: NextRequest) {
                   {
                     role: "system",
                     content:
-                      "You are Debater B. Stress-test assumptions, identify risk, and propose a competing but practical path.",
+                      "You are Debater B. Stress-test assumptions, identify risks, and propose a competing practical path. Do not generate code unless explicitly requested.",
                   },
                   {
                     role: "user",
@@ -332,7 +380,7 @@ export async function POST(request: NextRequest) {
                   {
                     role: "system",
                     content:
-                      "You are the Judge. Compare Debater A vs Debater B and return strict JSON only with keys: convergence_score (0-100), converged (boolean), synthesis, direction_for_next_round, unresolved_points (string array), clarifying_questions (string array), final_direction.",
+                      "You are the Judge. Compare Debater A vs Debater B and return strict JSON only with keys: convergence_score (0-100), converged (boolean), synthesis, direction_for_next_round, unresolved_points (string array), clarifying_questions (string array), final_direction. Keep synthesis concise and avoid code unless explicitly requested.",
                   },
                   {
                     role: "user",
@@ -396,7 +444,7 @@ export async function POST(request: NextRequest) {
                   {
                     role: "system",
                     content:
-                      "You are the Execution Agent. Turn the judge's converged direction into the final response for the user. Be concrete, actionable, and concise.",
+                      "You are the Execution Agent. Turn the judge's converged direction into the final response for the user. Be concrete, actionable, concise, and chat-aware. Do not include code unless explicitly requested.",
                   },
                   {
                     role: "user",
@@ -484,35 +532,111 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const enableThinking = thinkingRequested || resolvedModel === "nemotron30b";
-    const response = await fetch(OPENROUTER_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
-        "X-Title": "DeepConverge AI",
+    const enableThinking = convergentThinking;
+
+    // Instant UX for simple social pings in non-convergent chat mode.
+    if (!convergentThinking && isShortSocialMessage(message)) {
+      const normalized = message.trim().toLowerCase();
+      const instantReply =
+        /how are you/.test(normalized)
+          ? "I am doing well. What can I help you with?"
+          : "Hey! How can I help you today?";
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          let partial = "";
+          try {
+            const words = instantReply.split(" ");
+            for (let i = 0; i < words.length; i++) {
+              partial += `${i > 0 ? " " : ""}${words[i]}`;
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    type: "content",
+                    content: partial,
+                  })}\n\n`
+                )
+              );
+              await wait(38);
+            }
+
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({
+                  type: "done",
+                  reasoning: "",
+                  content: instantReply,
+                })}\n\n`
+              )
+            );
+            controller.close();
+          } catch {
+            try {
+              controller.close();
+            } catch {
+              // Client may have disconnected.
+            }
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      });
+    }
+    const baseMessages: ChatMessage[] = [
+      {
+        role: "system",
+        content: CHAT_SYSTEM_PROMPT,
       },
-      body: JSON.stringify({
+      {
+        role: "user",
+        content: message,
+      },
+    ];
+    const buildStreamPayload = (includeReasoning: boolean) => {
+      const payload: Record<string, unknown> = {
         model: MODEL_IDS[resolvedModel],
-        messages: [
-          {
-            role: "system",
-            content: CHAT_SYSTEM_PROMPT,
-          },
-          {
-            role: "user",
-            content: message,
-          },
-        ],
-        reasoning: enableThinking
-          ? { effort: "high" }
-          : { effort: "none", exclude: true },
+        messages: baseMessages,
         stream: true,
-        temperature: 0.7,
-        max_tokens: 8192,
-      }),
+        temperature: enableThinking ? 0.7 : 0.45,
+        max_tokens: resolvedModel === "nemotron9b" ? 4096 : 8192,
+      };
+      if (includeReasoning && enableThinking) {
+        payload.reasoning = { effort: "high" };
+      }
+      return payload;
+    };
+
+    const requestHeaders = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
+      "X-Title": "DeepConverge AI",
+    };
+
+    let response = await fetch(OPENROUTER_API_URL, {
+      method: "POST",
+      headers: requestHeaders,
+      body: JSON.stringify(buildStreamPayload(true)),
     });
+
+    if (!response.ok && resolvedModel === "nemotron9b" && !enableThinking) {
+      const initialError = await response.text();
+      console.warn(
+        "9B request failed with default payload; retrying without reasoning hints:",
+        initialError
+      );
+      response = await fetch(OPENROUTER_API_URL, {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify(buildStreamPayload(false)),
+      });
+    }
 
     if (!response.ok) {
       const error = await response.text();
@@ -568,7 +692,7 @@ export async function POST(request: NextRequest) {
             const parsed = JSON.parse(data);
             const delta = parsed.choices?.[0]?.delta;
             const reasoningChunk = delta?.reasoning || "";
-            if (reasoningChunk) {
+            if (enableThinking && reasoningChunk) {
               reasoning += reasoningChunk;
               safeEnqueue({ type: "reasoning", content: reasoning });
             }
