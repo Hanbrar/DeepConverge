@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { inflateSync } from "zlib";
 
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -6,6 +7,7 @@ const MODEL_IDS = {
   nemotron9b: "nvidia/nemotron-nano-9b-v2:free",
   nemotron30b: "nvidia/nemotron-3-nano-30b-a3b",
 } as const;
+const VISION_MODEL_ID = "nvidia/nemotron-nano-12b-v2-vl:free";
 
 type ChatModel = keyof typeof MODEL_IDS;
 type ChatMessage = {
@@ -135,6 +137,190 @@ function statusFromScore(score: number, converged: boolean, needsInput: boolean)
   return "running";
 }
 
+function buildImageAugmentedTask(userMessage: string, imageAnalysis: string): string {
+  const normalizedTask = userMessage.trim() || "Analyze the uploaded image and help the user.";
+  return [
+    `User request: ${normalizedTask}`,
+    "Vision context: The uploaded image was analyzed by NVIDIA Nemotron Nano 12B V2 VL.",
+    "Use the vision context as factual evidence, then complete the user request clearly and practically.",
+    "",
+    "Image analysis:",
+    imageAnalysis.slice(0, 5000),
+  ].join("\n");
+}
+
+function decodePdfDataUrl(dataUrl: string): Buffer | null {
+  const match = dataUrl.match(/^data:application\/pdf(?:;charset=[^;]+)?;base64,(.+)$/i);
+  if (!match) return null;
+  try {
+    return Buffer.from(match[1], "base64");
+  } catch {
+    return null;
+  }
+}
+
+function decodePdfEscapedString(token: string): string {
+  return token
+    .replace(/\\([nrtbf()\\])/g, (_, ch: string) => {
+      const map: Record<string, string> = {
+        n: "\n",
+        r: "\r",
+        t: "\t",
+        b: "\b",
+        f: "\f",
+        "(": "(",
+        ")": ")",
+        "\\": "\\",
+      };
+      return map[ch] ?? ch;
+    })
+    .replace(/\\([0-7]{1,3})/g, (_, oct: string) =>
+      String.fromCharCode(parseInt(oct, 8))
+    );
+}
+
+function extractPdfTextFromContent(content: string): string {
+  const chunks: string[] = [];
+  const directTextRe = /\((?:\\.|[^\\()])*\)\s*T[Jj]/g;
+
+  for (const match of content.matchAll(directTextRe)) {
+    const raw = match[0];
+    const literal = raw.slice(0, raw.lastIndexOf(")")).replace(/^\(/, "");
+    const decoded = decodePdfEscapedString(literal).trim();
+    if (decoded) chunks.push(decoded);
+  }
+
+  const tjArrayRe = /\[([\s\S]*?)\]\s*TJ/g;
+  for (const match of content.matchAll(tjArrayRe)) {
+    const body = match[1];
+    const literals = body.match(/\((?:\\.|[^\\()])*\)/g) || [];
+    const decoded = literals
+      .map((lit) => decodePdfEscapedString(lit.slice(1, -1)))
+      .join("")
+      .trim();
+    if (decoded) chunks.push(decoded);
+  }
+
+  return chunks.join("\n");
+}
+
+function extractPdfText(data: Buffer): string {
+  const latin = data.toString("latin1");
+  const parts: string[] = [];
+
+  const direct = extractPdfTextFromContent(latin);
+  if (direct) parts.push(direct);
+
+  let cursor = 0;
+  while (true) {
+    const streamKeyIndex = latin.indexOf("stream", cursor);
+    if (streamKeyIndex === -1) break;
+
+    const streamStartMatch = latin
+      .slice(streamKeyIndex)
+      .match(/^stream\r?\n/);
+    if (!streamStartMatch) {
+      cursor = streamKeyIndex + 6;
+      continue;
+    }
+
+    const start = streamKeyIndex + streamStartMatch[0].length;
+    const end = latin.indexOf("endstream", start);
+    if (end === -1) break;
+
+    const dictStart = Math.max(0, latin.lastIndexOf("<<", streamKeyIndex));
+    const dictEnd = latin.indexOf(">>", dictStart);
+    const dict =
+      dictStart !== -1 && dictEnd !== -1 && dictEnd < streamKeyIndex
+        ? latin.slice(dictStart, dictEnd + 2)
+        : "";
+
+    const slice = data.subarray(start, end);
+    if (dict.includes("/FlateDecode")) {
+      try {
+        const inflated = inflateSync(slice).toString("latin1");
+        const text = extractPdfTextFromContent(inflated);
+        if (text) parts.push(text);
+      } catch {
+        // Ignore unreadable compressed streams.
+      }
+    }
+
+    cursor = end + 9;
+  }
+
+  const merged = parts.join("\n").replace(/[^\x09\x0A\x0D\x20-\x7E]/g, " ").trim();
+  return merged;
+}
+
+function buildPdfAugmentedTask(userMessage: string, pdfExtract: string): string {
+  const normalizedTask = userMessage.trim() || "Analyze the uploaded PDF and help the user.";
+  const extracted =
+    pdfExtract.trim() ||
+    "No readable text could be extracted from the PDF. Ask the user for a text snippet or clearer source.";
+  return [
+    `User request: ${normalizedTask}`,
+    "Document context: The uploaded PDF was parsed for textual content.",
+    "Use the extracted document text as primary context and answer accurately.",
+    "",
+    "Extracted PDF text:",
+    extracted.slice(0, 6000),
+  ].join("\n");
+}
+
+async function analyzeImageWithVision(params: {
+  apiKey: string;
+  imageDataUrl: string;
+  userMessage: string;
+}) {
+  const response = await fetch(OPENROUTER_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${params.apiKey}`,
+      "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
+      "X-Title": "DeepConverge AI",
+    },
+    body: JSON.stringify({
+      model: VISION_MODEL_ID,
+      stream: false,
+      max_tokens: 1200,
+      temperature: 0.2,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a vision analysis agent. Return concise, accurate visual observations, extracted text, and relevant details for downstream task execution.",
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: [
+                `User prompt: ${params.userMessage || "Analyze this image."}`,
+                "Produce: 1) key visual facts, 2) any text/OCR, 3) constraints or ambiguities, 4) short actionable interpretation.",
+              ].join("\n"),
+            },
+            {
+              type: "image_url",
+              image_url: { url: params.imageDataUrl },
+            },
+          ],
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Vision model error: ${response.status} - ${errText}`);
+  }
+
+  const json = await response.json();
+  return extractAssistantText(json);
+}
+
 async function completeOnce(params: {
   apiKey: string;
   model: string;
@@ -175,8 +361,14 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const message = typeof body?.message === "string" ? body.message.trim() : "";
     const convergentThinking = body?.convergentThinking === true;
+    const imageDataUrlRaw =
+      typeof body?.imageDataUrl === "string" ? body.imageDataUrl.trim() : "";
+    const pdfDataUrlRaw =
+      typeof body?.pdfDataUrl === "string" ? body.pdfDataUrl.trim() : "";
+    const hasImage = imageDataUrlRaw.startsWith("data:image/");
+    const hasPdf = pdfDataUrlRaw.startsWith("data:application/pdf");
 
-    if (!message) {
+    if (!message && !hasImage && !hasPdf) {
       return new Response(JSON.stringify({ error: "Message is required" }), {
         status: 400,
         headers: { "Content-Type": "application/json" },
@@ -225,8 +417,33 @@ export async function POST(request: NextRequest) {
 
           try {
             const convergentModel = MODEL_IDS.nemotron30b;
+            const rawTask = message || "Analyze the uploaded file.";
+            let taskMessage = rawTask;
 
-            if (isShortSocialMessage(message)) {
+            if (hasImage) {
+              send({
+                type: "status",
+                content: "Analyzing image with the Nemotron Nano 12B V2 model.",
+              });
+              const imageAnalysis = await analyzeImageWithVision({
+                apiKey,
+                imageDataUrl: imageDataUrlRaw,
+                userMessage: rawTask,
+              });
+              taskMessage = buildImageAugmentedTask(rawTask, imageAnalysis);
+            }
+
+            if (hasPdf) {
+              send({
+                type: "status",
+                content: "Analyzing PDF.",
+              });
+              const pdfBuffer = decodePdfDataUrl(pdfDataUrlRaw);
+              const pdfExtract = pdfBuffer ? extractPdfText(pdfBuffer) : "";
+              taskMessage = buildPdfAugmentedTask(taskMessage, pdfExtract);
+            }
+
+            if (!hasImage && !hasPdf && isShortSocialMessage(rawTask)) {
               send({
                 type: "convergent_start",
                 round: 0,
@@ -249,7 +466,7 @@ export async function POST(request: NextRequest) {
                     },
                     {
                       role: "user",
-                      content: message,
+                      content: rawTask,
                     },
                   ],
                 })) || "Hey - how can I help?";
@@ -281,15 +498,15 @@ export async function POST(request: NextRequest) {
               temperature: 0.3,
               maxTokens: 350,
               reasoning: { effort: "none", exclude: true },
-                messages: [
-                  {
-                    role: "system",
-                    content:
-                      "You are the Judge in a convergent-thinking multi-agent workflow. State task framing, evaluation criteria, and convergence target in 3 concise bullets. Keep this productivity-focused and avoid code unless explicitly requested.",
+              messages: [
+                {
+                  role: "system",
+                  content:
+                    "You are the Judge in a convergent-thinking multi-agent workflow. State task framing, evaluation criteria, and convergence target in 3 concise bullets. Keep this productivity-focused and avoid code unless explicitly requested.",
                 },
                 {
                   role: "user",
-                  content: `Task: ${message}`,
+                  content: `Task: ${taskMessage}`,
                 },
               ],
             });
@@ -311,7 +528,7 @@ export async function POST(request: NextRequest) {
             let latestB = "";
             let latestJudgeDirection = kickoff;
             const transcript: string[] = [
-              `User task: ${message}`,
+              `User task: ${taskMessage}`,
               `Judge kickoff: ${kickoff}`,
             ];
 
@@ -332,7 +549,7 @@ export async function POST(request: NextRequest) {
                   },
                   {
                     role: "user",
-                    content: `Task: ${message}\n\nCurrent context:\n${contextTail}\n\nJudge direction:\n${latestJudgeDirection}\n\nGive your round-${round} position.`,
+                    content: `Task: ${taskMessage}\n\nCurrent context:\n${contextTail}\n\nJudge direction:\n${latestJudgeDirection}\n\nGive your round-${round} position.`,
                   },
                 ],
               });
@@ -358,7 +575,7 @@ export async function POST(request: NextRequest) {
                   },
                   {
                     role: "user",
-                    content: `Task: ${message}\n\nContext:\n${contextTail}\n\nDebater A round-${round}:\n${latestA}\n\nJudge direction:\n${latestJudgeDirection}\n\nGive your round-${round} position.`,
+                    content: `Task: ${taskMessage}\n\nContext:\n${contextTail}\n\nDebater A round-${round}:\n${latestA}\n\nJudge direction:\n${latestJudgeDirection}\n\nGive your round-${round} position.`,
                   },
                 ],
               });
@@ -384,7 +601,7 @@ export async function POST(request: NextRequest) {
                   },
                   {
                     role: "user",
-                    content: `Task: ${message}\n\nDebater A:\n${latestA}\n\nDebater B:\n${latestB}\n\nCurrent round: ${round}\n\nIf convergence is high, set converged=true and final_direction. If convergence is low and this is final round (${MAX_CONVERGENCE_ROUNDS}), include 2-4 clarifying_questions.`,
+                    content: `Task: ${taskMessage}\n\nDebater A:\n${latestA}\n\nDebater B:\n${latestB}\n\nCurrent round: ${round}\n\nIf convergence is high, set converged=true and final_direction. If convergence is low and this is final round (${MAX_CONVERGENCE_ROUNDS}), include 2-4 clarifying_questions.`,
                   },
                 ],
               });
@@ -448,7 +665,7 @@ export async function POST(request: NextRequest) {
                   },
                   {
                     role: "user",
-                    content: `Task: ${message}\n\nJudge final direction:\n${finalDirection}\n\nDebater A final:\n${latestA}\n\nDebater B final:\n${latestB}\n\nProduce the final answer.`,
+                    content: `Task: ${taskMessage}\n\nJudge final direction:\n${finalDirection}\n\nDebater A final:\n${latestA}\n\nDebater B final:\n${latestB}\n\nProduce the final answer.`,
                   },
                 ],
               });
@@ -533,10 +750,27 @@ export async function POST(request: NextRequest) {
     }
 
     const enableThinking = convergentThinking;
+    const rawTask = message || "Analyze the uploaded file.";
+    let nonConvergentTask = rawTask;
+
+    if (hasImage) {
+      const imageAnalysis = await analyzeImageWithVision({
+        apiKey,
+        imageDataUrl: imageDataUrlRaw,
+        userMessage: rawTask,
+      });
+      nonConvergentTask = buildImageAugmentedTask(rawTask, imageAnalysis);
+    }
+
+    if (hasPdf) {
+      const pdfBuffer = decodePdfDataUrl(pdfDataUrlRaw);
+      const pdfExtract = pdfBuffer ? extractPdfText(pdfBuffer) : "";
+      nonConvergentTask = buildPdfAugmentedTask(nonConvergentTask, pdfExtract);
+    }
 
     // Instant UX for simple social pings in non-convergent chat mode.
-    if (!convergentThinking && isShortSocialMessage(message)) {
-      const normalized = message.trim().toLowerCase();
+    if (!convergentThinking && !hasImage && !hasPdf && isShortSocialMessage(rawTask)) {
+      const normalized = rawTask.trim().toLowerCase();
       const instantReply =
         /how are you/.test(normalized)
           ? "I am doing well. What can I help you with?"
@@ -595,7 +829,7 @@ export async function POST(request: NextRequest) {
       },
       {
         role: "user",
-        content: message,
+        content: nonConvergentTask,
       },
     ];
     const buildStreamPayload = (includeReasoning: boolean) => {

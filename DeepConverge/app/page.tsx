@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type ChangeEvent, type DragEvent } from "react";
 import Image from "next/image";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
@@ -15,6 +15,12 @@ interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  attachment?: {
+    kind: "image" | "pdf";
+    name: string;
+    dataUrl: string;
+  };
+  status?: string;
   reasoning?: string;
   isStreaming?: boolean;
   convergent?: {
@@ -36,6 +42,12 @@ type Mode = "agentic" | "debate";
 type DebatePhase = "setup" | "active";
 type DebateType = "regular" | "continuous";
 type AgenticModel = "nemotron9b" | "nemotron30b";
+type PendingAttachment = {
+  kind: "image" | "pdf";
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+};
 
 const AGENTIC_MODELS: Record<AgenticModel, { label: string; display: string }> = {
   nemotron9b: {
@@ -61,9 +73,12 @@ export default function Home() {
   const [expandedConvergent, setExpandedConvergent] = useState<Record<string, boolean>>({});
   const [animatedConvergence, setAnimatedConvergence] = useState<Record<string, number>>({});
   const [copiedCodeKey, setCopiedCodeKey] = useState<string | null>(null);
+  const [attachedFile, setAttachedFile] = useState<PendingAttachment | null>(null);
+  const [isDragActive, setIsDragActive] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const agenticPanelRef = useRef<HTMLDivElement>(null);
   const debatePanelRef = useRef<HTMLDivElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeAssistantIdRef = useRef<string | null>(null);
@@ -233,20 +248,146 @@ export default function Home() {
     abortControllerRef.current.abort();
   };
 
+  const handleAttachClick = () => {
+    if (isLoading) return;
+    imageInputRef.current?.click();
+  };
+
+  const fileToDataUrl = async (file: File) => {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+      reader.onerror = () => reject(new Error("Failed to read file"));
+      reader.readAsDataURL(file);
+    }).catch(() => "");
+    return dataUrl;
+  };
+
+  const toPendingAttachment = async (file: File): Promise<PendingAttachment | null> => {
+    const isImage = file.type.startsWith("image/");
+    const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+    if (!isImage && !isPdf) return null;
+
+    const dataUrl = await fileToDataUrl(file);
+    if (!dataUrl) return null;
+
+    return {
+      kind: isImage ? "image" : "pdf",
+      name: file.name,
+      mimeType: file.type || (isPdf ? "application/pdf" : "image/*"),
+      dataUrl,
+    };
+  };
+
+  const attachFromFile = async (file: File) => {
+    const attachment = await toPendingAttachment(file);
+    if (!attachment) return;
+    setAttachedFile(attachment);
+  };
+
+  const handleImageFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      event.target.value = "";
+      return;
+    }
+    await attachFromFile(file);
+    event.target.value = "";
+  };
+
+  const hasFileDataInClipboard = (items: DataTransferItemList | undefined | null) => {
+    if (!items) return false;
+    return Array.from(items).some((item) => {
+      const type = item.type || "";
+      return type.startsWith("image/") || type === "application/pdf";
+    });
+  };
+
+  const findSupportedFile = (files: FileList | null | undefined) => {
+    if (!files) return null;
+    return (
+      Array.from(files).find((file) => {
+        const type = file.type || "";
+        return type.startsWith("image/") || type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+      }) || null
+    );
+  };
+
+  useEffect(() => {
+    const onPaste = async (event: ClipboardEvent) => {
+      if (isLoading) return;
+
+      const clipboardItems = event.clipboardData?.items;
+      let file = findSupportedFile(event.clipboardData?.files);
+      if (!file && hasFileDataInClipboard(clipboardItems)) {
+        const fileItem = clipboardItems
+          ? Array.from(clipboardItems).find((item) => {
+              const type = item.type || "";
+              return type.startsWith("image/") || type === "application/pdf";
+            })
+          : null;
+        file = fileItem?.getAsFile() || null;
+      }
+      if (!file) return;
+
+      event.preventDefault();
+      await attachFromFile(file);
+    };
+
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading]);
+
+  const handleDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer?.types?.includes("Files")) return;
+    event.preventDefault();
+    if (!isDragActive) setIsDragActive(true);
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node)) return;
+    if (isDragActive) setIsDragActive(false);
+  };
+
+  const handleDrop = async (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDragActive(false);
+    if (isLoading) return;
+
+    const file = findSupportedFile(event.dataTransfer?.files);
+    if (!file) return;
+    await attachFromFile(file);
+  };
+
   // ── Chat logic (unchanged) ───────────────────────────────────────────
   const sendMessage = async () => {
-    if (!input.trim() || isLoading) return;
+    const trimmedInput = input.trim();
+    const fileToSend = attachedFile;
+    if ((!trimmedInput && !fileToSend) || isLoading) return;
 
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
-      content: input.trim(),
+      content: trimmedInput || (fileToSend?.kind === "pdf" ? "Analyze this PDF." : "Analyze this image."),
+      attachment: fileToSend
+        ? {
+            kind: fileToSend.kind,
+            name: fileToSend.name,
+            dataUrl: fileToSend.dataUrl,
+          }
+        : undefined,
     };
 
     const assistantMessage: Message = {
       id: (Date.now() + 1).toString(),
       role: "assistant",
       content: "",
+      status: fileToSend
+        ? fileToSend.kind === "pdf"
+          ? "Analyzing PDF."
+          : "Analyzing image with the Nemotron Nano 12B V2 model."
+        : undefined,
       reasoning: "",
       isStreaming: true,
       convergent: convergentEnabled
@@ -263,6 +404,7 @@ export default function Home() {
 
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setInput("");
+    setAttachedFile(null);
     setIsLoading(true);
 
     const abortController = new AbortController();
@@ -276,10 +418,12 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: input.trim(),
+          message: trimmedInput,
           model: activeModel,
           thinking: convergentEnabled,
           convergentThinking: convergentEnabled,
+          imageDataUrl: fileToSend?.kind === "image" ? fileToSend.dataUrl : undefined,
+          pdfDataUrl: fileToSend?.kind === "pdf" ? fileToSend.dataUrl : undefined,
         }),
         signal: abortController.signal,
       });
@@ -311,7 +455,18 @@ export default function Home() {
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === assistantMessage.id
-                      ? { ...msg, reasoning: data.content }
+                      ? { ...msg, reasoning: data.content, status: undefined }
+                      : msg
+                  )
+                );
+              } else if (data.type === "status") {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMessage.id
+                      ? {
+                          ...msg,
+                          status: typeof data.content === "string" ? data.content : msg.status,
+                        }
                       : msg
                   )
                 );
@@ -412,7 +567,7 @@ export default function Home() {
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === assistantMessage.id
-                      ? { ...msg, content: data.content }
+                      ? { ...msg, content: data.content, status: undefined }
                       : msg
                   )
                 );
@@ -423,6 +578,7 @@ export default function Home() {
                       ? {
                           ...msg,
                           isStreaming: false,
+                          status: undefined,
                           convergent: msg.convergent
                             ? {
                                 ...msg.convergent,
@@ -457,6 +613,7 @@ export default function Home() {
                     : isTimeout
                     ? "The request took too long. The reasoning above shows the progress made. Please try a simpler question or try again."
                     : "Sorry, there was an error. Please try again.",
+                status: undefined,
                 isStreaming: false,
               }
             : msg
@@ -489,7 +646,26 @@ export default function Home() {
 
   // ── SINGLE-PAGE SHELL ────────────────────────────────────────────────
   return (
-    <div className="min-h-screen flex bg-[#fffaf3]">
+    <div
+      className="min-h-screen flex bg-[#fffaf3]"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/*,application/pdf,.pdf"
+        className="hidden"
+        onChange={handleImageFileChange}
+      />
+      {isDragActive && (
+        <div className="fixed inset-0 z-50 bg-[#111827]/35 backdrop-blur-[1px] flex items-center justify-center pointer-events-none">
+          <div className="rounded-2xl border border-white/30 bg-[#0f172a]/80 px-6 py-4 text-white text-sm font-medium shadow-xl">
+            Drop image or PDF to attach
+          </div>
+        </div>
+      )}
       {/* ── Left Sidebar ──────────────────────────────────────────────── */}
       <aside
         className="fixed top-0 left-0 bottom-0 z-40 flex flex-col bg-[#fffaf2] border-r border-[#ebebeb] transition-all duration-200"
@@ -726,6 +902,47 @@ export default function Home() {
                 aria-hidden={!isAgenticMode}
               >
                 <div className="bg-[#fffaf2] rounded-2xl border border-[#e5e7eb] shadow-sm overflow-hidden">
+                  {attachedFile && (
+                    <div className="px-4 pt-3">
+                      <div className="flex items-center gap-3 rounded-xl border border-[#e5e7eb] bg-[#f8fafc] px-3 py-2">
+                        {attachedFile.kind === "image" ? (
+                          <Image
+                            src={attachedFile.dataUrl}
+                            alt={attachedFile.name}
+                            width={48}
+                            height={48}
+                            unoptimized
+                            className="h-12 w-12 rounded-md object-cover border border-[#d1d5db]"
+                          />
+                        ) : (
+                          <div className="h-12 w-12 rounded-md border border-[#d1d5db] bg-white flex items-center justify-center text-[#dc2626]">
+                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 3h7l5 5v13a1 1 0 01-1 1H7a1 1 0 01-1-1V4a1 1 0 011-1z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 3v6h6" />
+                            </svg>
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-medium text-[#2d2d2d] truncate">
+                            {attachedFile.name}
+                          </p>
+                          <p className="text-[11px] text-[#64748b]">
+                            {attachedFile.kind === "pdf" ? "Analyzing PDF." : "Analyzing image."}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAttachedFile(null)}
+                          className="text-[#9ca3af] hover:text-[#6b7280] transition-colors"
+                          aria-label="Remove attachment"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <textarea
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
@@ -743,9 +960,14 @@ export default function Home() {
                   />
                   <div className="flex items-center justify-between gap-3 px-4 pb-3">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <button className="p-1.5 rounded-md hover:bg-[#f3f4f6] transition-colors text-[#9ca3af]" tabIndex={isAgenticMode ? 0 : -1}>
+                      <button
+                        type="button"
+                        onClick={handleAttachClick}
+                        className="p-1.5 rounded-md hover:bg-[#f3f4f6] transition-colors text-[#9ca3af]"
+                        tabIndex={isAgenticMode ? 0 : -1}
+                      >
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4.5 4.5 0 016.36 6.36l-9.2 9.19a3 3 0 01-4.24-4.24l8.49-8.48" />
                         </svg>
                       </button>
                       <button
@@ -767,7 +989,7 @@ export default function Home() {
                     </div>
                     <button
                       onClick={isLoading ? stopGeneration : sendMessage}
-                      disabled={!isLoading && !input.trim()}
+                      disabled={!isLoading && !input.trim() && !attachedFile}
                       className="w-8 h-8 rounded-full bg-[#7c6bf5] text-white flex items-center justify-center hover:bg-[#6c5ce7] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                       tabIndex={isAgenticMode ? 0 : -1}
                       title={isLoading ? "Stop generation" : "Send message"}
@@ -953,8 +1175,27 @@ export default function Home() {
                   <div key={message.id}>
                     {message.role === "user" ? (
                       <div className="flex justify-end">
-                        <div className="bg-[#6b7280] text-white px-4 py-3 rounded-2xl rounded-br-md max-w-[80%]">
-                          {message.content}
+                        <div className="bg-[#6b7280] text-white px-4 py-3 rounded-2xl rounded-br-md max-w-[80%] space-y-2">
+                          {message.attachment?.kind === "image" && (
+                            <Image
+                              src={message.attachment.dataUrl}
+                              alt={message.attachment.name || "Uploaded image"}
+                              width={320}
+                              height={180}
+                              unoptimized
+                              className="max-h-40 w-auto rounded-lg border border-white/30"
+                            />
+                          )}
+                          {message.attachment?.kind === "pdf" && (
+                            <div className="inline-flex items-center gap-2 rounded-lg border border-white/30 bg-black/10 px-2 py-1 text-xs">
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 3h7l5 5v13a1 1 0 01-1 1H7a1 1 0 01-1-1V4a1 1 0 011-1z" />
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 3v6h6" />
+                              </svg>
+                              <span className="truncate max-w-48">{message.attachment.name}</span>
+                            </div>
+                          )}
+                          <div>{message.content}</div>
                         </div>
                       </div>
                     ) : (
@@ -971,6 +1212,15 @@ export default function Home() {
                           </span>
                           Nemotron
                         </div>
+
+                        {message.isStreaming && message.status && (
+                          <div className="px-2 sm:px-3">
+                            <div className="inline-flex items-center gap-2 rounded-full border border-[#e5e7eb] bg-[#f8fafc] px-3 py-1 text-xs text-[#64748b]">
+                              <span className="w-1.5 h-1.5 rounded-full bg-[#6366f1] animate-pulse" />
+                              {message.status}
+                            </div>
+                          </div>
+                        )}
 
                         {message.reasoning && (
                           <div className="bg-[#f9fafb] border border-[#e5e7eb] rounded-xl overflow-hidden shadow-sm">
@@ -1214,6 +1464,47 @@ export default function Home() {
             <div className="fixed bottom-0 right-0 p-4 bg-gradient-to-t from-[#fffaf2] to-transparent transition-all duration-200" style={{ left: sidebarWidth }}>
               <div className="w-full max-w-5xl mx-auto px-2 sm:px-4">
                 <div className="bg-[#fffaf2] rounded-2xl border border-[#e5e7eb] shadow-sm overflow-hidden">
+                  {attachedFile && (
+                    <div className="px-4 pt-3">
+                      <div className="flex items-center gap-3 rounded-xl border border-[#e5e7eb] bg-[#f8fafc] px-3 py-2">
+                        {attachedFile.kind === "image" ? (
+                          <Image
+                            src={attachedFile.dataUrl}
+                            alt={attachedFile.name}
+                            width={48}
+                            height={48}
+                            unoptimized
+                            className="h-12 w-12 rounded-md object-cover border border-[#d1d5db]"
+                          />
+                        ) : (
+                          <div className="h-12 w-12 rounded-md border border-[#d1d5db] bg-white flex items-center justify-center text-[#dc2626]">
+                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 3h7l5 5v13a1 1 0 01-1 1H7a1 1 0 01-1-1V4a1 1 0 011-1z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 3v6h6" />
+                            </svg>
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-medium text-[#2d2d2d] truncate">
+                            {attachedFile.name}
+                          </p>
+                          <p className="text-[11px] text-[#64748b]">
+                            {attachedFile.kind === "pdf" ? "Analyzing PDF." : "Analyzing image."}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setAttachedFile(null)}
+                          className="text-[#9ca3af] hover:text-[#6b7280] transition-colors"
+                          aria-label="Remove attachment"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <div className="px-4 pt-3 pb-2">
                     <div className="flex items-end gap-3">
                       <textarea
@@ -1232,7 +1523,7 @@ export default function Home() {
                       />
                       <button
                         onClick={isLoading ? stopGeneration : sendMessage}
-                        disabled={!isLoading && !input.trim()}
+                        disabled={!isLoading && !input.trim() && !attachedFile}
                         className="w-8 h-8 mb-1 rounded-full bg-[#7c6bf5] text-white flex items-center justify-center hover:bg-[#6c5ce7] transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
                         title={isLoading ? "Stop generation" : "Send message"}
                       >
@@ -1249,9 +1540,13 @@ export default function Home() {
                     </div>
                   </div>
                   <div className="flex items-center gap-3 px-4 pb-3">
-                    <button className="p-1 rounded-md hover:bg-[#f3f4f6] transition-colors text-[#9ca3af] flex-shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleAttachClick}
+                      className="p-1 rounded-md hover:bg-[#f3f4f6] transition-colors text-[#9ca3af] flex-shrink-0"
+                    >
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4.5 4.5 0 016.36 6.36l-9.2 9.19a3 3 0 01-4.24-4.24l8.49-8.48" />
                       </svg>
                     </button>
                     <button
