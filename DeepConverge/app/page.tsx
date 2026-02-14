@@ -64,6 +64,10 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const agenticPanelRef = useRef<HTMLDivElement>(null);
   const debatePanelRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeAssistantIdRef = useRef<string | null>(null);
+  const manualStopRef = useRef(false);
   const [modePanelHeight, setModePanelHeight] = useState<number>(0);
 
   // Debate state
@@ -223,6 +227,12 @@ export default function Home() {
     </ReactMarkdown>
   );
 
+  const stopGeneration = () => {
+    if (!isLoading || !abortControllerRef.current) return;
+    manualStopRef.current = true;
+    abortControllerRef.current.abort();
+  };
+
   // ── Chat logic (unchanged) ───────────────────────────────────────────
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return;
@@ -256,7 +266,10 @@ export default function Home() {
     setIsLoading(true);
 
     const abortController = new AbortController();
-    const timeoutId = setTimeout(() => abortController.abort(), 300000);
+    abortControllerRef.current = abortController;
+    manualStopRef.current = false;
+    activeAssistantIdRef.current = assistantMessage.id;
+    timeoutRef.current = setTimeout(() => abortController.abort(), 300000);
 
     try {
       const response = await fetch("/api/chat", {
@@ -438,16 +451,25 @@ export default function Home() {
           msg.id === assistantMessage.id
             ? {
                 ...msg,
-                content: isTimeout
-                  ? "The request took too long. The reasoning above shows the progress made. Please try a simpler question or try again."
-                  : "Sorry, there was an error. Please try again.",
+                content:
+                  isTimeout && manualStopRef.current
+                    ? (msg.content.trim() ? msg.content : "Generation stopped.")
+                    : isTimeout
+                    ? "The request took too long. The reasoning above shows the progress made. Please try a simpler question or try again."
+                    : "Sorry, there was an error. Please try again.",
                 isStreaming: false,
               }
             : msg
         )
       );
     } finally {
-      clearTimeout(timeoutId);
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      abortControllerRef.current = null;
+      activeAssistantIdRef.current = null;
+      manualStopRef.current = false;
       setIsLoading(false);
     }
   };
@@ -744,15 +766,15 @@ export default function Home() {
                       </span>
                     </div>
                     <button
-                      onClick={sendMessage}
-                      disabled={!input.trim() || isLoading}
+                      onClick={isLoading ? stopGeneration : sendMessage}
+                      disabled={!isLoading && !input.trim()}
                       className="w-8 h-8 rounded-full bg-[#7c6bf5] text-white flex items-center justify-center hover:bg-[#6c5ce7] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                       tabIndex={isAgenticMode ? 0 : -1}
+                      title={isLoading ? "Stop generation" : "Send message"}
                     >
                       {isLoading ? (
-                        <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none">
+                          <rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" />
                         </svg>
                       ) : (
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1151,6 +1173,25 @@ export default function Home() {
                           </div>
                         )}
 
+                        {message.isStreaming &&
+                          !message.content &&
+                          !message.reasoning &&
+                          !message.convergent && (
+                            <div className="px-2 sm:px-3">
+                              <div className="inline-flex items-center gap-1.5 rounded-full border border-[#e5e7eb] bg-[#f9fafb] px-3 py-1.5 text-[#6b7280]">
+                                <span className="h-1.5 w-1.5 rounded-full bg-current animate-bounce" />
+                                <span
+                                  className="h-1.5 w-1.5 rounded-full bg-current animate-bounce"
+                                  style={{ animationDelay: "120ms" }}
+                                />
+                                <span
+                                  className="h-1.5 w-1.5 rounded-full bg-current animate-bounce"
+                                  style={{ animationDelay: "240ms" }}
+                                />
+                              </div>
+                            </div>
+                          )}
+
                         {(message.content || (!message.reasoning && !message.isStreaming)) && (
                           <div className="px-2 sm:px-3">
                             <div className="prose prose-sm max-w-none prose-headings:text-[#2d2d2d] prose-p:text-[#374151] prose-strong:text-[#1f2937] prose-code:bg-[#f3f4f6] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[#1f2937] prose-pre:text-gray-100">
@@ -1190,14 +1231,14 @@ export default function Home() {
                         disabled={isLoading}
                       />
                       <button
-                        onClick={sendMessage}
-                        disabled={!input.trim() || isLoading}
+                        onClick={isLoading ? stopGeneration : sendMessage}
+                        disabled={!isLoading && !input.trim()}
                         className="w-8 h-8 mb-1 rounded-full bg-[#7c6bf5] text-white flex items-center justify-center hover:bg-[#6c5ce7] transition-colors disabled:opacity-30 disabled:cursor-not-allowed flex-shrink-0"
+                        title={isLoading ? "Stop generation" : "Send message"}
                       >
                         {isLoading ? (
-                          <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none">
+                            <rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" />
                           </svg>
                         ) : (
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
