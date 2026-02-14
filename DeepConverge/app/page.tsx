@@ -21,6 +21,18 @@ interface Message {
 type Mode = "agentic" | "debate";
 type DebatePhase = "setup" | "active";
 type DebateType = "regular" | "continuous";
+type AgenticModel = "nemotron9b" | "nemotron30b";
+
+const AGENTIC_MODELS: Record<AgenticModel, { label: string; display: string }> = {
+  nemotron9b: {
+    label: "NVIDIA: Nemotron Nano 9B V2 (free)",
+    display: "Nemotron Nano 9B V2 (free)",
+  },
+  nemotron30b: {
+    label: "NVIDIA: Nemotron 3 Nano 30B A3B",
+    display: "Nemotron 3 Nano 30B A3B",
+  },
+};
 
 export default function Home() {
   // Core mode state
@@ -31,6 +43,8 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<AgenticModel>("nemotron9b");
+  const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const agenticPanelRef = useRef<HTMLDivElement>(null);
   const debatePanelRef = useRef<HTMLDivElement>(null);
@@ -90,6 +104,16 @@ export default function Home() {
     setMode(nextMode);
   };
 
+  const handleModelChange = (model: AgenticModel) => {
+    setSelectedModel(model);
+    setThinkingEnabled(model === "nemotron30b");
+  };
+
+  const handleThinkingToggle = (enabled: boolean) => {
+    setThinkingEnabled(enabled);
+    setSelectedModel(enabled ? "nemotron30b" : "nemotron9b");
+  };
+
   // ── Chat logic (unchanged) ───────────────────────────────────────────
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return;
@@ -119,7 +143,11 @@ export default function Home() {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: input.trim() }),
+        body: JSON.stringify({
+          message: input.trim(),
+          model: selectedModel,
+          thinking: thinkingEnabled,
+        }),
         signal: abortController.signal,
       });
 
@@ -302,6 +330,22 @@ export default function Home() {
         className="flex-1 flex flex-col min-h-screen transition-all duration-200"
         style={{ marginLeft: sidebarWidth }}
       >
+        {isAgenticMode && (
+          <div className="fixed top-4 right-4 z-30">
+            <div className="rounded-xl border border-[#e5e7eb] bg-[#fffaf2]/95 backdrop-blur-sm shadow-sm px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-[#9ca3af]">
+                Active Model
+              </p>
+              <p className="text-xs font-semibold text-[#2d2d2d]">
+                {AGENTIC_MODELS[selectedModel].display}
+              </p>
+              <p className="text-[11px] text-[#6b7280]">
+                Deep Thinking: {thinkingEnabled ? "On" : "Off"}
+              </p>
+            </div>
+          </div>
+        )}
+
         {isDebateActive ? (
           <div className="flex-1 min-h-0">
             <DebateCanvas
@@ -450,12 +494,52 @@ export default function Home() {
                     disabled={isLoading}
                     tabIndex={isAgenticMode ? 0 : -1}
                   />
-                  <div className="flex items-center justify-between px-4 pb-3">
-                    <button className="p-1.5 rounded-md hover:bg-[#f3f4f6] transition-colors text-[#9ca3af]" tabIndex={isAgenticMode ? 0 : -1}>
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                      </svg>
-                    </button>
+                  <div className="flex items-center justify-between gap-3 px-4 pb-3">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button className="p-1.5 rounded-md hover:bg-[#f3f4f6] transition-colors text-[#9ca3af]" tabIndex={isAgenticMode ? 0 : -1}>
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                        </svg>
+                      </button>
+                      <select
+                        value={selectedModel}
+                        onChange={(e) => handleModelChange(e.target.value as AgenticModel)}
+                        disabled={isLoading}
+                        tabIndex={isAgenticMode ? 0 : -1}
+                        className="h-8 rounded-lg border border-[#e5e7eb] bg-[#fffaf2] px-2 text-xs text-[#4b5563] outline-none focus:ring-2 focus:ring-[#7c6bf5]/30 disabled:opacity-60"
+                      >
+                        <option value="nemotron9b">Model: 9B (free)</option>
+                        <option value="nemotron30b">Model: 30B</option>
+                      </select>
+                      <div className="inline-flex rounded-lg border border-[#e5e7eb] overflow-hidden">
+                        <button
+                          type="button"
+                          onClick={() => handleThinkingToggle(false)}
+                          disabled={isLoading}
+                          tabIndex={isAgenticMode ? 0 : -1}
+                          className={`h-8 px-2 text-xs transition-colors ${
+                            !thinkingEnabled
+                              ? "bg-[#2d2d2d] text-white"
+                              : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
+                          } disabled:opacity-60`}
+                        >
+                          Not Thinking
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleThinkingToggle(true)}
+                          disabled={isLoading}
+                          tabIndex={isAgenticMode ? 0 : -1}
+                          className={`h-8 px-2 text-xs transition-colors ${
+                            thinkingEnabled
+                              ? "bg-[#2d2d2d] text-white"
+                              : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
+                          } disabled:opacity-60`}
+                        >
+                          Thinking
+                        </button>
+                      </div>
+                    </div>
                     <button
                       onClick={sendMessage}
                       disabled={!input.trim() || isLoading}
@@ -733,6 +817,41 @@ export default function Home() {
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                       </svg>
                     </button>
+                    <select
+                      value={selectedModel}
+                      onChange={(e) => handleModelChange(e.target.value as AgenticModel)}
+                      disabled={isLoading}
+                      className="h-8 rounded-lg border border-[#e5e7eb] bg-[#fffaf2] px-2 text-xs text-[#4b5563] outline-none focus:ring-2 focus:ring-[#7c6bf5]/30 disabled:opacity-60"
+                    >
+                      <option value="nemotron9b">Model: 9B (free)</option>
+                      <option value="nemotron30b">Model: 30B</option>
+                    </select>
+                    <div className="inline-flex rounded-lg border border-[#e5e7eb] overflow-hidden flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleThinkingToggle(false)}
+                        disabled={isLoading}
+                        className={`h-8 px-2 text-xs transition-colors ${
+                          !thinkingEnabled
+                            ? "bg-[#2d2d2d] text-white"
+                            : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
+                        } disabled:opacity-60`}
+                      >
+                        Not Thinking
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleThinkingToggle(true)}
+                        disabled={isLoading}
+                        className={`h-8 px-2 text-xs transition-colors ${
+                          thinkingEnabled
+                            ? "bg-[#2d2d2d] text-white"
+                            : "bg-[#fffaf2] text-[#6b7280] hover:bg-[#f3f4f6]"
+                        } disabled:opacity-60`}
+                      >
+                        Thinking
+                      </button>
+                    </div>
                     <input
                       type="text"
                       value={input}

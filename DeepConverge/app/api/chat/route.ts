@@ -1,11 +1,31 @@
 import { NextRequest } from "next/server";
 
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
-const MODEL = "nvidia/nemotron-3-nano-30b-a3b:free";
+const MODEL_IDS = {
+  nemotron9b: "nvidia/nemotron-nano-9b-v2:free",
+  nemotron30b: "nvidia/nemotron-3-nano-30b-a3b",
+} as const;
+
+type ChatModel = keyof typeof MODEL_IDS;
+
+const CHAT_SYSTEM_PROMPT = [
+  "You are DeepConverge, a productivity-focused AI chat assistant.",
+  "Operate like a high-throughput work copilot: optimize for clarity, speed, and useful execution.",
+  "This is a chat interface, so keep responses natural and context-aware, not essay-like by default.",
+  "For greetings or lightweight messages (e.g., 'hey', 'hi', 'thanks'), reply in one short friendly sentence.",
+  "Default to concise, action-oriented output with practical next steps.",
+  "Use longer explanations only when the user explicitly asks for depth.",
+  "Do not provide dictionary-style breakdowns unless requested.",
+  "Do not expose private chain-of-thought; provide brief rationale summaries when needed.",
+].join(" ");
 
 export async function POST(request: NextRequest) {
   try {
-    const { message } = await request.json();
+    const body = await request.json();
+    const message = typeof body?.message === "string" ? body.message : "";
+    const requestedModel =
+      typeof body?.model === "string" ? (body.model as ChatModel) : undefined;
+    const thinkingRequested = body?.thinking === true;
 
     if (!message || typeof message !== "string") {
       return new Response(JSON.stringify({ error: "Message is required" }), {
@@ -22,6 +42,15 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    const resolvedModel: ChatModel =
+      requestedModel && requestedModel in MODEL_IDS
+        ? requestedModel
+        : thinkingRequested
+        ? "nemotron30b"
+        : "nemotron9b";
+    const enableThinking =
+      thinkingRequested || resolvedModel === "nemotron30b";
+
     const response = await fetch(OPENROUTER_API_URL, {
       method: "POST",
       headers: {
@@ -31,17 +60,20 @@ export async function POST(request: NextRequest) {
         "X-Title": "DeepConverge AI",
       },
       body: JSON.stringify({
-        model: MODEL,
+        model: MODEL_IDS[resolvedModel],
         messages: [
           {
             role: "system",
-            content: "You are a helpful AI assistant. Think through problems step by step before providing your answer.",
+            content: CHAT_SYSTEM_PROMPT,
           },
           {
             role: "user",
             content: message,
           },
         ],
+        reasoning: enableThinking
+          ? { effort: "high" }
+          : { effort: "none", exclude: true },
         stream: true,
         temperature: 0.7,
         max_tokens: 8192,
