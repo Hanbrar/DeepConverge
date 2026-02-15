@@ -17,6 +17,7 @@ interface DebateMessage {
 interface DebateCanvasProps {
   question: string;
   rounds: number;
+  apiKey: string;
   onComplete?: () => void;
   onDebateFinished?: (messages: { speaker: string; content: string }[]) => void;
 }
@@ -71,6 +72,7 @@ const parseSseEvents = (buffer: string) => {
 export default function DebateCanvas({
   question,
   rounds,
+  apiKey,
   onComplete,
   onDebateFinished,
 }: DebateCanvasProps) {
@@ -127,7 +129,7 @@ export default function DebateCanvas({
       const response = await fetch("/api/debate-mode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, rounds }),
+        body: JSON.stringify({ question, rounds, apiKey }),
         signal: controller.signal,
       });
 
@@ -149,7 +151,13 @@ export default function DebateCanvas({
           // Ignore JSON parsing errors and keep status-based message.
         }
         setLoadingLabel(
-          response.status === 400 ? "Debate topic blocked." : "Debate failed."
+          response.status === 429 || response.status === 402
+            ? "You've hit your usage limit. Extra usage is coming once beta mode is over. Thank you for testing our product!"
+            : response.status === 400
+            ? "Debate topic blocked."
+            : response.status === 401
+            ? "API key is required. Please add your OpenRouter API key in Settings."
+            : "Debate failed."
         );
         setStopMessage(errorText);
         setIsGenerationStopped(true);
@@ -374,7 +382,7 @@ export default function DebateCanvas({
       setMessages((prev) => [...prev, { ...nextMsg, displayedContent: "" }]);
       setActiveSpeaker(nextMsg.speaker);
     }, delay);
-  }, [phase, messages, onComplete]);
+  }, [phase, messages, onComplete, onDebateFinished]);
 
   // Clear active speaker when current message finishes typing
   useEffect(() => {

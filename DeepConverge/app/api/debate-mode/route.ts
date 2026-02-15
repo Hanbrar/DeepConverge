@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MODEL = "nvidia/nemotron-nano-9b-v2:free";
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+// API key is provided per-request by the user
 
 interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -339,11 +339,9 @@ async function searchWikipedia(query: string, limit = 3): Promise<SearchResult[]
 async function fetchWithRetry(
   messages: ChatMessage[],
   label: string,
+  apiKey: string,
   maxRetries = 5
 ): Promise<Response> {
-  if (!OPENROUTER_API_KEY) {
-    throw new Error("OPENROUTER_API_KEY not configured");
-  }
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const requestId = `${label}-${Date.now()}-${attempt}`;
@@ -355,7 +353,7 @@ async function fetchWithRetry(
       cache: "no-store",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "HTTP-Referer":
           process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
         "X-Title": `DeepConverge Debate - ${label}`,
@@ -406,9 +404,10 @@ async function fetchWithRetry(
 
 async function* streamFromOpenRouter(
   messages: ChatMessage[],
-  label: string
+  label: string,
+  apiKey: string
 ): AsyncGenerator<StreamChunk> {
-  const response = await fetchWithRetry(messages, label);
+  const response = await fetchWithRetry(messages, label, apiKey);
 
   const reader = response.body?.getReader();
   if (!reader) throw new Error("No response body");
@@ -462,7 +461,14 @@ async function* streamFromOpenRouter(
 
 export async function POST(request: NextRequest) {
   try {
-    const { question, rounds = 2 } = await request.json();
+    const { question, rounds = 2, apiKey } = await request.json();
+
+    if (!apiKey || typeof apiKey !== "string") {
+      return new Response(
+        JSON.stringify({ error: "API key is required. Please add your OpenRouter API key in Settings." }),
+        { status: 401, headers: { "Content-Type": "application/json" } }
+      );
+    }
 
     if (!question || typeof question !== "string") {
       return new Response(JSON.stringify({ error: "Question is required" }), {
@@ -482,12 +488,6 @@ export async function POST(request: NextRequest) {
           status: 400,
           headers: { "Content-Type": "application/json" },
         }
-      );
-    }
-    if (!OPENROUTER_API_KEY) {
-      return new Response(
-        JSON.stringify({ error: "OPENROUTER_API_KEY not configured" }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
       );
     }
 
@@ -559,7 +559,7 @@ export async function POST(request: NextRequest) {
 
           let modIntroContent = "";
 
-          for await (const chunk of streamFromOpenRouter(modIntroMessages, "moderator-intro")) {
+          for await (const chunk of streamFromOpenRouter(modIntroMessages, "moderator-intro", apiKey)) {
             if (isClosed) break;
             if (chunk.type === "content" && chunk.text) {
               modIntroContent += chunk.text;
@@ -619,7 +619,7 @@ export async function POST(request: NextRequest) {
 
             let turnContent = "";
 
-            for await (const chunk of streamFromOpenRouter(messages, label)) {
+            for await (const chunk of streamFromOpenRouter(messages, label, apiKey)) {
               if (isClosed) break;
               if (chunk.type === "content" && chunk.text) {
                 turnContent += chunk.text;
@@ -656,7 +656,7 @@ export async function POST(request: NextRequest) {
 
           let verdictContent = "";
 
-          for await (const chunk of streamFromOpenRouter(verdictMessages, "verdict")) {
+          for await (const chunk of streamFromOpenRouter(verdictMessages, "verdict", apiKey)) {
             if (isClosed) break;
             if (chunk.type === "content" && chunk.text) {
               verdictContent += chunk.text;

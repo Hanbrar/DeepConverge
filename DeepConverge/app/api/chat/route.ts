@@ -785,12 +785,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const apiKey = process.env.OPENROUTER_API_KEY;
+    const apiKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
     if (!apiKey) {
-      return new Response(JSON.stringify({ error: "API key not configured" }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({ error: "API key is required. Please add your OpenRouter API key in Settings." }),
+        { status: 401, headers: { "Content-Type": "application/json" } }
+      );
     }
 
     const rawTask = message || "Analyze the uploaded file.";
@@ -1393,10 +1393,17 @@ export async function POST(request: NextRequest) {
           if (!response.ok) {
             const errText = await response.text();
             console.error("OpenRouter error:", errText);
+            const isUsageLimit =
+              response.status === 429 ||
+              response.status === 402 ||
+              errText.toLowerCase().includes("credits") ||
+              errText.toLowerCase().includes("quota") ||
+              errText.toLowerCase().includes("rate limit");
             send({
               type: "content",
-              content:
-                "Sorry, there was an error connecting to the AI model. Please try again.",
+              content: isUsageLimit
+                ? "You've hit your usage limit. Extra usage is coming once beta mode is over. Thank you for testing our product!"
+                : "Sorry, there was an error connecting to the AI model. Please try again.",
             });
             send({ type: "done", reasoning: "", content: "" });
             safeClose();

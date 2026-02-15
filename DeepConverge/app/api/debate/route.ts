@@ -16,13 +16,14 @@ interface StreamChunk {
 }
 
 async function* streamFromOpenRouter(
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  apiKey: string
 ): AsyncGenerator<StreamChunk> {
   const response = await fetch(OPENROUTER_API_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
       "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
       "X-Title": "DeepConverge Debate",
     },
@@ -41,6 +42,16 @@ async function* streamFromOpenRouter(
 
   if (!response.ok) {
     const error = await response.text();
+    if (
+      response.status === 429 ||
+      response.status === 402 ||
+      error.toLowerCase().includes("credits") ||
+      error.toLowerCase().includes("quota")
+    ) {
+      throw new Error(
+        "USAGE_LIMIT: You've hit your usage limit. Extra usage is coming once beta mode is over. Thank you for testing our product!"
+      );
+    }
     throw new Error(`OpenRouter API error: ${response.status} - ${error}`);
   }
 
@@ -85,7 +96,14 @@ async function* streamFromOpenRouter(
 
 export async function POST(request: NextRequest) {
   try {
-    const { question } = await request.json();
+    const { question, apiKey } = await request.json();
+
+    if (!apiKey || typeof apiKey !== "string") {
+      return new Response(
+        JSON.stringify({ error: "API key is required. Please add your OpenRouter API key in Settings." }),
+        { status: 401, headers: { "Content-Type": "application/json" } }
+      );
+    }
 
     if (!question || typeof question !== "string") {
       return new Response(JSON.stringify({ error: "Question is required" }), {
@@ -162,7 +180,7 @@ export async function POST(request: NextRequest) {
             let fullContent = "";
             let reasoning = "";
 
-            for await (const chunk of streamFromOpenRouter(messages)) {
+            for await (const chunk of streamFromOpenRouter(messages, apiKey)) {
               if (isClosed) break;
 
               if (chunk.type === "reasoning") {

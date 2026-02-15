@@ -11,6 +11,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { preprocessLaTeX } from "@/lib/latex";
 import DebateCanvas from "@/components/DebateCanvas";
+import SettingsPanel from "@/components/SettingsPanel";
 import { createClient } from "@/lib/supabase/client";
 import type { User } from "@supabase/supabase-js";
 import {
@@ -22,6 +23,7 @@ import {
   touchConversation,
   type Conversation,
 } from "@/lib/supabase/conversations";
+import { getProfile } from "@/lib/supabase/profile";
 
 interface Message {
   id: string;
@@ -157,6 +159,11 @@ export default function Home() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
 
+  // API key + settings state
+  const [openrouterApiKey, setOpenrouterApiKey] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [profileDisplayName, setProfileDisplayName] = useState<string | null>(null);
+
   // Auth initialization
   useEffect(() => {
     const supabase = createClient();
@@ -186,6 +193,14 @@ export default function Home() {
     }
     const supabase = createClient();
     loadConversations(supabase, user.id).then(setConversations);
+    getProfile(supabase, user.id).then((profile) => {
+      if (profile?.openrouter_api_key) {
+        setOpenrouterApiKey(profile.openrouter_api_key);
+      }
+      if (profile?.display_name) {
+        setProfileDisplayName(profile.display_name);
+      }
+    });
 
     // Check for pending query from landing page
     const pendingQuery = localStorage.getItem("deepconverge_pending_query");
@@ -613,6 +628,10 @@ export default function Home() {
 
   // ── Chat logic (unchanged) ───────────────────────────────────────────
   const sendMessage = async () => {
+    if (!openrouterApiKey) {
+      setSettingsOpen(true);
+      return;
+    }
     const trimmedInput = input.trim();
     const fileToSend = attachedFile;
     if ((!trimmedInput && !fileToSend) || isLoading) return;
@@ -696,6 +715,7 @@ export default function Home() {
           webSearch: webSearchEnabled,
           imageDataUrl: fileToSend?.kind === "image" ? fileToSend.dataUrl : undefined,
           pdfDataUrl: fileToSend?.kind === "pdf" ? fileToSend.dataUrl : undefined,
+          apiKey: openrouterApiKey,
         }),
         signal: abortController.signal,
       });
@@ -938,6 +958,10 @@ export default function Home() {
 
   // ── Debate helpers ───────────────────────────────────────────────────
   const startDebate = async () => {
+    if (!openrouterApiKey) {
+      setSettingsOpen(true);
+      return;
+    }
     if (!debateQuestion.trim()) return;
     const check = validateDebateTopic(debateQuestion);
     if (!check.allowed) {
@@ -1013,6 +1037,9 @@ export default function Home() {
               className="object-contain -ml-2"
               priority
             />
+            <span className="px-2 py-0.5 rounded-full bg-[#7c6bf5] text-white text-[10px] font-bold uppercase tracking-wide">
+              BETA
+            </span>
             <span className="mx-2 h-5 w-px bg-[#d1d5db]" />
             <div className="flex items-center gap-1.5">
               <Image
@@ -1036,7 +1063,7 @@ export default function Home() {
         </header>
 
         {/* Hero */}
-        <main className="flex-1 flex flex-col items-center justify-center px-4 -mt-16">
+        <main className="flex-1 flex flex-col items-center px-4 pt-16 pb-8">
           <Image
             src="/bestlogo.png"
             alt="DeepConverge logo"
@@ -1045,8 +1072,11 @@ export default function Home() {
             className="object-contain mb-6"
             priority
           />
-          <h1 className="text-5xl font-bold text-[#2d2d2d] mb-4 text-center">
+          <h1 className="text-5xl font-bold text-[#2d2d2d] mb-4 text-center flex items-center justify-center gap-3">
             DeepConverge
+            <span className="px-3 py-1 rounded-full bg-[#7c6bf5] text-white text-sm font-bold uppercase tracking-wide">
+              BETA
+            </span>
           </h1>
           <p className="text-lg text-[#6b7280] mb-10 text-center max-w-xl leading-relaxed">
             Answer your questions by watching LLMs debate and find the best solution for you. Sit back and relax.
@@ -1107,28 +1137,110 @@ export default function Home() {
             </p>
           </div>
 
-          {/* Feature pills */}
-          <div className="flex items-center gap-3 mt-10 flex-wrap justify-center">
-            <span className="px-4 py-1.5 rounded-full border border-[#e5e7eb] bg-white text-xs text-[#6b7280]">
-              Multi-Agent Debate
-            </span>
-            <span className="px-4 py-1.5 rounded-full border border-[#e5e7eb] bg-white text-xs text-[#6b7280]">
-              Convergent Thinking
-            </span>
-            <span className="px-4 py-1.5 rounded-full border border-[#e5e7eb] bg-white text-xs text-[#6b7280]">
-              Web Search
-            </span>
-            <span className="px-4 py-1.5 rounded-full border border-[#e5e7eb] bg-white text-xs text-[#6b7280]">
-              PDF &amp; Image Analysis
-            </span>
+          {/* Feature Showcase */}
+          <div className="w-full max-w-3xl mt-16 space-y-4">
+            {[
+              {
+                title: "Timestamps",
+                description:
+                  "No other AI model has timestamps. See exactly when each message was generated.",
+                icon: (
+                  <svg className="w-5 h-5 text-[#7c6bf5]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                ),
+              },
+              {
+                title: "PDF Export",
+                description:
+                  "Export all your conversations as a PDF. Give it to other LLMs to seamlessly move between AI providers.",
+                icon: (
+                  <svg className="w-5 h-5 text-[#7c6bf5]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                  </svg>
+                ),
+              },
+              {
+                title: "MAD Intelligence",
+                description:
+                  "Multi-Agent Debate: Watch AI agents argue, challenge, and synthesize smarter answers together.",
+                icon: (
+                  <svg className="w-5 h-5 text-[#7c6bf5]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                ),
+              },
+              {
+                title: "User Data Control",
+                description:
+                  "You own your data. Export, delete, and manage everything.",
+                icon: (
+                  <svg className="w-5 h-5 text-[#7c6bf5]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                  </svg>
+                ),
+              },
+            ].map((feature) => (
+              <div
+                key={feature.title}
+                className="flex items-start gap-4 bg-white rounded-xl border border-[#e5e7eb] p-5 shadow-sm"
+              >
+                <div className="w-10 h-10 rounded-lg bg-[#f3f0ff] flex items-center justify-center flex-shrink-0">
+                  {feature.icon}
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-[#2d2d2d] mb-1">
+                    {feature.title}
+                  </h3>
+                  <p className="text-xs text-[#6b7280] leading-relaxed">
+                    {feature.description}
+                  </p>
+                </div>
+              </div>
+            ))}
           </div>
         </main>
 
         {/* Footer */}
-        <footer className="py-4 text-center">
-          <p className="text-xs text-[#9ca3af]">
-            Powered by NVIDIA Nemotron via OpenRouter
-          </p>
+        <footer className="py-8 px-8">
+          <div className="max-w-3xl mx-auto flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Image
+                src="/bestlogo.png"
+                alt="DeepConverge logo"
+                width={28}
+                height={28}
+                className="object-contain"
+              />
+              <span className="text-xs text-[#9ca3af]">
+                &copy; 2026 DeepConverge
+              </span>
+            </div>
+            <div className="flex items-center gap-4">
+              <a
+                href="https://x.com/ItsHB17"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[#9ca3af] hover:text-[#6b7280] transition-colors"
+                aria-label="Twitter/X"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
+                </svg>
+              </a>
+              <a
+                href="https://github.com/Hanbrar/DeepConverge"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[#9ca3af] hover:text-[#6b7280] transition-colors"
+                aria-label="GitHub"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
+                </svg>
+              </a>
+            </div>
+          </div>
         </footer>
       </div>
     );
@@ -1214,10 +1326,13 @@ export default function Home() {
         {/* Divider */}
         <div className="mx-3 border-t border-[#ebebeb]" />
 
-        {/* User info */}
+        {/* User info — click to open Settings */}
         {sidebarOpen && user && (
           <div className="px-3 py-2 border-b border-[#ebebeb]">
-            <div className="flex items-center gap-2">
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="w-full flex items-center gap-2 rounded-lg hover:bg-[#f3f4f6] transition-colors p-1"
+            >
               {user.user_metadata?.avatar_url ? (
                 <Image
                   src={user.user_metadata.avatar_url}
@@ -1232,10 +1347,14 @@ export default function Home() {
                   {(user.user_metadata?.full_name || user.email || "U")[0].toUpperCase()}
                 </div>
               )}
-              <span className="text-xs text-[#4b5563] truncate flex-1">
-                {user.user_metadata?.full_name || user.email || "User"}
+              <span className="text-xs text-[#4b5563] truncate flex-1 text-left">
+                {profileDisplayName || user.user_metadata?.full_name || user.email || "User"}
               </span>
-            </div>
+              <svg className="w-3.5 h-3.5 text-[#9ca3af] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </button>
           </div>
         )}
 
@@ -1410,6 +1529,7 @@ export default function Home() {
             <DebateCanvas
               question={debateQuestion}
               rounds={debateRounds}
+              apiKey={openrouterApiKey || ""}
               onDebateFinished={handleDebateFinished}
             />
           </div>
@@ -1428,6 +1548,24 @@ export default function Home() {
                 priority
               />
             </h1>
+
+            {/* API key warning */}
+            {!openrouterApiKey && (
+              <div className="w-full max-w-md mb-6 bg-[#fffbeb] border border-[#fde68a] rounded-xl px-4 py-3 text-center">
+                <p className="text-sm text-[#92400e] font-medium mb-1">
+                  API Key Required
+                </p>
+                <p className="text-xs text-[#b45309] mb-2">
+                  Add your OpenRouter API key in Settings to start chatting.
+                </p>
+                <button
+                  onClick={() => setSettingsOpen(true)}
+                  className="text-xs font-medium text-[#7c6bf5] hover:underline"
+                >
+                  Open Settings
+                </button>
+              </div>
+            )}
 
             {/* Mode tabs */}
             <div className="flex items-center gap-16 mb-0">
@@ -2277,7 +2415,18 @@ export default function Home() {
           </>
         )}
       </div>
+
+      {/* Settings Panel */}
+      {user && settingsOpen && (
+        <SettingsPanel
+          onClose={() => setSettingsOpen(false)}
+          user={user}
+          apiKey={openrouterApiKey}
+          onApiKeyChange={(key) => setOpenrouterApiKey(key)}
+          displayName={profileDisplayName}
+          onDisplayNameChange={(name) => setProfileDisplayName(name)}
+        />
+      )}
     </div>
   );
 }
-

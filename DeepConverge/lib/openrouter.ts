@@ -12,7 +12,8 @@ interface ChatMessage {
 export async function* streamAgentResponse(
   agentRole: AgentRole,
   question: string,
-  previousResponses: { role: AgentRole; content: string }[]
+  previousResponses: { role: AgentRole; content: string }[],
+  apiKey: string
 ): AsyncGenerator<StreamChunk> {
   const agent = agents[agentRole];
 
@@ -45,7 +46,7 @@ export async function* streamAgentResponse(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      "Authorization": `Bearer ${apiKey}`,
       "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
       "X-Title": "DeepConverge Debate",
     },
@@ -119,7 +120,8 @@ export async function* streamAgentResponse(
 
 export async function runDebate(
   question: string,
-  onChunk: (chunk: StreamChunk) => void
+  onChunk: (chunk: StreamChunk) => void,
+  apiKey: string
 ): Promise<void> {
   const responses: { role: AgentRole; content: string }[] = [];
 
@@ -127,7 +129,7 @@ export async function runDebate(
     let finalContent = "";
     let _finalReasoning = "";
 
-    for await (const chunk of streamAgentResponse(agentRole, question, responses)) {
+    for await (const chunk of streamAgentResponse(agentRole, question, responses, apiKey)) {
       onChunk(chunk);
       if (chunk.done) {
         finalContent = chunk.content;
