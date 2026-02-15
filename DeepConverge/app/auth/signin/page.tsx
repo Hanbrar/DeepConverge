@@ -26,10 +26,11 @@ function SignInForm() {
   useEffect(() => {
     const callbackError = searchParams.get("error");
     if (callbackError) {
-      // If user was blocked by Google Testing mode, show waitlist
+      // If user was blocked by Google Testing mode or not approved, show waitlist
       if (
         callbackError.toLowerCase().includes("access_denied") ||
-        callbackError.toLowerCase().includes("access blocked")
+        callbackError.toLowerCase().includes("access blocked") ||
+        callbackError === "not_approved"
       ) {
         setShowWaitlist(true);
       } else {

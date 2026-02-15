@@ -1,6 +1,9 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+// Routes that bypass the is_approved check
+const PUBLIC_ROUTES = ["/auth/signin", "/auth/callback", "/api/waitlist"];
+
 export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,
@@ -30,7 +33,35 @@ export async function middleware(request: NextRequest) {
   );
 
   // Refresh the session - this is critical for auth to work
-  await supabase.auth.getUser();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  // If user is logged in and this isn't a public route, check approval
+  const pathname = request.nextUrl.pathname;
+  if (user && !PUBLIC_ROUTES.some((r) => pathname.startsWith(r))) {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("is_approved")
+      .eq("id", user.id)
+      .single();
+
+    if (!profile?.is_approved) {
+      // Sign them out so they can't keep accessing the app
+      await supabase.auth.signOut();
+
+      const redirectUrl = request.nextUrl.clone();
+      redirectUrl.pathname = "/auth/signin";
+      redirectUrl.searchParams.set("error", "not_approved");
+
+      // Build redirect response and copy any cookies that were set
+      const redirectResponse = NextResponse.redirect(redirectUrl);
+      supabaseResponse.cookies.getAll().forEach((cookie) => {
+        redirectResponse.cookies.set(cookie.name, cookie.value);
+      });
+      return redirectResponse;
+    }
+  }
 
   return supabaseResponse;
 }
