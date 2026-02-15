@@ -1213,7 +1213,7 @@ export default function Home() {
                 className="object-contain"
               />
               <span className="text-xs text-[#9ca3af]">
-                &copy; 2026 DeepConverge
+                &copy; 2026 DeepConverge &middot; Made by Hanryck Brar
               </span>
             </div>
             <div className="flex items-center gap-4">
@@ -1963,7 +1963,7 @@ export default function Home() {
 
               {/* Footer */}
               <p className="text-xs text-[#9ca3af] text-center mt-6">
-                Powered by NVIDIA Nemotron via OpenRouter
+                Powered by NVIDIA Nemotron via OpenRouter &middot; Made by Hanryck Brar
               </p>
             </div>
           </main>
