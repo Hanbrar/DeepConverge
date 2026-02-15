@@ -18,6 +18,7 @@ interface DebateCanvasProps {
   question: string;
   rounds: number;
   onComplete?: () => void;
+  onDebateFinished?: (messages: { speaker: string; content: string }[]) => void;
 }
 
 type Phase = "loading" | "presenting" | "complete";
@@ -71,6 +72,7 @@ export default function DebateCanvas({
   question,
   rounds,
   onComplete,
+  onDebateFinished,
 }: DebateCanvasProps) {
   // ── State ──
   const [phase, setPhase] = useState<Phase>("loading");
@@ -341,6 +343,9 @@ export default function DebateCanvas({
         setPhase("complete");
         setActiveSpeaker(null);
         onComplete?.();
+        onDebateFinished?.(
+          messages.map((m) => ({ speaker: m.speaker, content: m.content }))
+        );
       }
       return;
     }

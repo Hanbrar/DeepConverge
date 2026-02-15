@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useRef, useEffect, type ChangeEvent, type DragEvent } from "react";
+import { useState, useRef, useEffect, useCallback, type ChangeEvent, type DragEvent } from "react";
+import Link from "next/link";
 import Image from "next/image";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
@@ -10,6 +11,17 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { preprocessLaTeX } from "@/lib/latex";
 import DebateCanvas from "@/components/DebateCanvas";
+import { createClient } from "@/lib/supabase/client";
+import type { User } from "@supabase/supabase-js";
+import {
+  createConversation,
+  saveMessage as dbSaveMessage,
+  loadConversations,
+  loadMessages,
+  deleteConversation,
+  touchConversation,
+  type Conversation,
+} from "@/lib/supabase/conversations";
 
 interface Message {
   id: string;
@@ -94,6 +106,12 @@ function validateDebateTopic(topic: string): { allowed: boolean; message?: strin
   return { allowed: true };
 }
 
+const TYPEWRITER_PROMPTS = [
+  "Can you help me solve this equation?",
+  "Search the web for today's top news",
+  "What are the pros and cons of solar energy?",
+];
+
 export default function Home() {
   // Core mode state
   const [mode, setMode] = useState<Mode>("agentic");
@@ -129,6 +147,163 @@ export default function Home() {
 
   // Sidebar state
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // Auth state
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  // Conversation history state
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+
+  // Auth initialization
+  useEffect(() => {
+    const supabase = createClient();
+    supabase.auth
+      .getUser()
+      .then(({ data, error }) => {
+        if (error) console.warn("Auth check:", error.message);
+        setUser(data.user);
+        setAuthLoading(false);
+      })
+      .catch(() => {
+        setAuthLoading(false);
+      });
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Load conversations when user changes
+  useEffect(() => {
+    if (!user) {
+      setConversations([]);
+      return;
+    }
+    const supabase = createClient();
+    loadConversations(supabase, user.id).then(setConversations);
+
+    // Check for pending query from landing page
+    const pendingQuery = localStorage.getItem("deepconverge_pending_query");
+    if (pendingQuery) {
+      localStorage.removeItem("deepconverge_pending_query");
+      setInput(pendingQuery);
+    }
+  }, [user]);
+
+  const refreshConversations = useCallback(() => {
+    if (!user) return;
+    const supabase = createClient();
+    loadConversations(supabase, user.id).then(setConversations);
+  }, [user]);
+
+  // Typewriter animation for landing page
+  const [typewriterText, setTypewriterText] = useState("");
+  const [typewriterActive, setTypewriterActive] = useState(true);
+  const [landingInputFocused, setLandingInputFocused] = useState(false);
+  const [landingInput, setLandingInput] = useState("");
+
+  useEffect(() => {
+    if (!typewriterActive || landingInputFocused || user) return;
+
+    let promptIndex = 0;
+    let charIndex = 0;
+    let isDeleting = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    const tick = () => {
+      const currentPrompt = TYPEWRITER_PROMPTS[promptIndex];
+
+      if (!isDeleting) {
+        charIndex++;
+        setTypewriterText(currentPrompt.slice(0, charIndex));
+
+        if (charIndex >= currentPrompt.length) {
+          // Pause at end of prompt
+          timeoutId = setTimeout(() => {
+            isDeleting = true;
+            tick();
+          }, 2000);
+          return;
+        }
+        timeoutId = setTimeout(tick, 70);
+      } else {
+        charIndex--;
+        setTypewriterText(currentPrompt.slice(0, charIndex));
+
+        if (charIndex <= 0) {
+          isDeleting = false;
+          promptIndex = (promptIndex + 1) % TYPEWRITER_PROMPTS.length;
+          timeoutId = setTimeout(tick, 400);
+          return;
+        }
+        timeoutId = setTimeout(tick, 35);
+      }
+    };
+
+    timeoutId = setTimeout(tick, 500);
+    return () => clearTimeout(timeoutId);
+  }, [typewriterActive, landingInputFocused, user]);
+
+  const handleSignOut = async () => {
+    const supabase = createClient();
+    await supabase.auth.signOut();
+    setUser(null);
+    setMessages([]);
+    setConversations([]);
+    setActiveConversationId(null);
+  };
+
+  const handleLoadConversation = async (conv: Conversation) => {
+    const supabase = createClient();
+    const dbMessages = await loadMessages(supabase, conv.id);
+    const loaded: Message[] = dbMessages.map((m) => ({
+      id: m.id,
+      role: m.role as "user" | "assistant",
+      content: m.content,
+      reasoning: m.reasoning || undefined,
+      createdAt: m.created_at,
+      generatedAt: m.role === "assistant" ? m.created_at : undefined,
+    }));
+    setMessages(loaded);
+    setActiveConversationId(conv.id);
+    setMode("agentic");
+    setDebatePhase("setup");
+  };
+
+  const handleDeleteConversation = async (convId: string) => {
+    const supabase = createClient();
+    await deleteConversation(supabase, convId);
+    if (activeConversationId === convId) {
+      setMessages([]);
+      setActiveConversationId(null);
+    }
+    refreshConversations();
+  };
+
+  const handleExportPdf = async () => {
+    if (isExportingPdf) return;
+    setIsExportingPdf(true);
+    try {
+      const response = await fetch("/api/export-pdf");
+      if (!response.ok) throw new Error("Export failed");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `DeepConverge_Conversations_${new Date().toISOString().slice(0, 10)}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("PDF export error:", err);
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -211,6 +386,7 @@ export default function Home() {
     setInput("");
     setDebatePhase("setup");
     setMode("agentic");
+    setActiveConversationId(null);
   };
 
   const handleNewDebate = () => {
@@ -485,11 +661,28 @@ export default function Home() {
     setAttachmentError(null);
     setIsLoading(true);
 
+    // Save user message to DB
+    let activeConvId = activeConversationId;
+    if (user) {
+      const supabase = createClient();
+      if (!activeConvId) {
+        const title = trimmedInput.slice(0, 50) || "New Chat";
+        activeConvId = await createConversation(supabase, user.id, "chat", title);
+        if (activeConvId) setActiveConversationId(activeConvId);
+      }
+      if (activeConvId) {
+        await dbSaveMessage(supabase, activeConvId, "user", userMessage.content);
+      }
+    }
+
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
     manualStopRef.current = false;
     activeAssistantIdRef.current = assistantMessage.id;
     timeoutRef.current = setTimeout(() => abortController.abort(), 300000);
+
+    let finalContent = "";
+    let finalReasoning = "";
 
     try {
       const response = await fetch("/api/chat", {
@@ -531,6 +724,7 @@ export default function Home() {
               const data = JSON.parse(line.slice(6));
 
               if (data.type === "reasoning") {
+                finalReasoning = typeof data.content === "string" ? data.content : "";
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === assistantMessage.id
@@ -659,6 +853,7 @@ export default function Home() {
                   )
                 );
               } else if (data.type === "content") {
+                finalContent = typeof data.content === "string" ? data.content : "";
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === assistantMessage.id
@@ -730,11 +925,19 @@ export default function Home() {
       activeAssistantIdRef.current = null;
       manualStopRef.current = false;
       setIsLoading(false);
+
+      // Save assistant message to DB
+      if (user && activeConvId && finalContent) {
+        const supabase = createClient();
+        await dbSaveMessage(supabase, activeConvId, "assistant", finalContent, finalReasoning || undefined);
+        await touchConversation(supabase, activeConvId);
+        refreshConversations();
+      }
     }
   };
 
   // ── Debate helpers ───────────────────────────────────────────────────
-  const startDebate = () => {
+  const startDebate = async () => {
     if (!debateQuestion.trim()) return;
     const check = validateDebateTopic(debateQuestion);
     if (!check.allowed) {
@@ -743,6 +946,36 @@ export default function Home() {
     }
     setDebateGuardError(null);
     setDebatePhase("active");
+
+    // Create debate conversation in DB
+    if (user) {
+      const supabase = createClient();
+      const convId = await createConversation(
+        supabase,
+        user.id,
+        "debate",
+        debateQuestion.slice(0, 50)
+      );
+      if (convId) setActiveConversationId(convId);
+    }
+  };
+
+  const handleDebateFinished = async (
+    debateMessages: { speaker: string; content: string }[]
+  ) => {
+    if (!user || !activeConversationId) return;
+    const supabase = createClient();
+    for (const msg of debateMessages) {
+      const role =
+        msg.speaker === "blue"
+          ? "debater_blue"
+          : msg.speaker === "red"
+          ? "debater_red"
+          : "moderator";
+      await dbSaveMessage(supabase, activeConversationId, role, msg.content);
+    }
+    await touchConversation(supabase, activeConversationId);
+    refreshConversations();
   };
 
   const debateRounds = 2;
@@ -752,7 +985,156 @@ export default function Home() {
   const isDebateActive = mode === "debate" && debatePhase === "active";
   const isLanding = messages.length === 0;
 
-  // ── SINGLE-PAGE SHELL ────────────────────────────────────────────────
+  // ── AUTH LOADING ─────────────────────────────────────────────────────
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#fffaf3]">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-8 h-8 border-2 border-[#2d2d2d] border-t-transparent rounded-full animate-spin" />
+          <p className="text-sm text-[#6b7280]">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── LANDING PAGE (UNAUTHENTICATED) ────────────────────────────────────
+  if (!user) {
+    return (
+      <div className="min-h-screen flex flex-col bg-[#fffaf3]">
+        {/* Top bar */}
+        <header className="relative z-10 flex items-center justify-between px-8 py-5">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-[#2d2d2d] text-xl">DeepConverge</span>
+            <Image
+              src="/bestlogo.png"
+              alt="DeepConverge logo"
+              width={42}
+              height={42}
+              className="object-contain -ml-2"
+              priority
+            />
+            <span className="mx-2 h-5 w-px bg-[#d1d5db]" />
+            <div className="flex items-center gap-1.5">
+              <Image
+                src="/nvidia_logo.png"
+                alt="NVIDIA"
+                width={18}
+                height={18}
+                className="object-contain"
+              />
+              <span className="text-xs font-medium text-[#76b900]">
+                NVIDIA GTC 2026 Submission
+              </span>
+            </div>
+          </div>
+          <Link
+            href="/auth/signin"
+            className="px-5 py-2 rounded-full bg-[#2d2d2d] text-white text-sm font-medium hover:bg-[#1f2937] transition-colors"
+          >
+            Sign In
+          </Link>
+        </header>
+
+        {/* Hero */}
+        <main className="flex-1 flex flex-col items-center justify-center px-4 -mt-16">
+          <Image
+            src="/bestlogo.png"
+            alt="DeepConverge logo"
+            width={120}
+            height={120}
+            className="object-contain mb-6"
+            priority
+          />
+          <h1 className="text-5xl font-bold text-[#2d2d2d] mb-4 text-center">
+            DeepConverge
+          </h1>
+          <p className="text-lg text-[#6b7280] mb-10 text-center max-w-xl leading-relaxed">
+            Answer your questions by watching LLMs debate and find the best solution for you. Sit back and relax.
+          </p>
+
+          {/* Search bar with typewriter */}
+          <div className="w-full max-w-xl">
+            <div className="relative">
+              <input
+                type="text"
+                value={landingInput}
+                onChange={(e) => setLandingInput(e.target.value)}
+                onFocus={() => {
+                  setLandingInputFocused(true);
+                  setTypewriterActive(false);
+                }}
+                onBlur={() => {
+                  if (!landingInput.trim()) {
+                    setLandingInputFocused(false);
+                    setTypewriterActive(true);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const val = landingInput.trim();
+                    if (val) {
+                      localStorage.setItem("deepconverge_pending_query", val);
+                    }
+                    window.location.href = "/auth/signin";
+                  }
+                }}
+                className="w-full bg-white rounded-2xl px-6 py-4 border border-[#e5e7eb] shadow-sm outline-none focus:ring-2 focus:ring-[#7c6bf5]/30 focus:border-[#7c6bf5] text-[#2d2d2d] text-base"
+              />
+              {/* Typewriter overlay — shown when input not focused */}
+              {!landingInputFocused && (
+                <div className="absolute inset-0 flex items-center px-6 pointer-events-none">
+                  <span className="text-[#9ca3af] text-base">
+                    {typewriterText}
+                    <span className="inline-block w-[2px] h-5 bg-[#9ca3af] ml-0.5 align-middle animate-pulse" />
+                  </span>
+                </div>
+              )}
+              {landingInputFocused && !landingInput && (
+                <div className="absolute inset-0 flex items-center px-6 pointer-events-none">
+                  <span className="text-[#9ca3af] text-base">
+                    What can we help you with today?
+                  </span>
+                </div>
+              )}
+              <div className="absolute right-4 top-1/2 -translate-y-1/2">
+                <svg className="w-5 h-5 text-[#9ca3af]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 10l7-7m0 0l7 7m-7-7v18" />
+                </svg>
+              </div>
+            </div>
+            <p className="text-xs text-[#9ca3af] text-center mt-3">
+              Press Enter to sign in and start chatting
+            </p>
+          </div>
+
+          {/* Feature pills */}
+          <div className="flex items-center gap-3 mt-10 flex-wrap justify-center">
+            <span className="px-4 py-1.5 rounded-full border border-[#e5e7eb] bg-white text-xs text-[#6b7280]">
+              Multi-Agent Debate
+            </span>
+            <span className="px-4 py-1.5 rounded-full border border-[#e5e7eb] bg-white text-xs text-[#6b7280]">
+              Convergent Thinking
+            </span>
+            <span className="px-4 py-1.5 rounded-full border border-[#e5e7eb] bg-white text-xs text-[#6b7280]">
+              Web Search
+            </span>
+            <span className="px-4 py-1.5 rounded-full border border-[#e5e7eb] bg-white text-xs text-[#6b7280]">
+              PDF &amp; Image Analysis
+            </span>
+          </div>
+        </main>
+
+        {/* Footer */}
+        <footer className="py-4 text-center">
+          <p className="text-xs text-[#9ca3af]">
+            Powered by NVIDIA Nemotron via OpenRouter
+          </p>
+        </footer>
+      </div>
+    );
+  }
+
+  // ── SINGLE-PAGE SHELL (AUTHENTICATED) ─────────────────────────────────
   return (
     <div
       className="min-h-screen flex bg-[#fffaf3]"
@@ -832,6 +1214,31 @@ export default function Home() {
         {/* Divider */}
         <div className="mx-3 border-t border-[#ebebeb]" />
 
+        {/* User info */}
+        {sidebarOpen && user && (
+          <div className="px-3 py-2 border-b border-[#ebebeb]">
+            <div className="flex items-center gap-2">
+              {user.user_metadata?.avatar_url ? (
+                <Image
+                  src={user.user_metadata.avatar_url}
+                  alt="Avatar"
+                  width={24}
+                  height={24}
+                  className="rounded-full"
+                  unoptimized
+                />
+              ) : (
+                <div className="w-6 h-6 rounded-full bg-[#7c6bf5] flex items-center justify-center text-white text-xs font-bold">
+                  {(user.user_metadata?.full_name || user.email || "U")[0].toUpperCase()}
+                </div>
+              )}
+              <span className="text-xs text-[#4b5563] truncate flex-1">
+                {user.user_metadata?.full_name || user.email || "User"}
+              </span>
+            </div>
+          </div>
+        )}
+
         {/* Chat History */}
         <div className="px-3 pt-3 flex-1 overflow-y-auto">
           {sidebarOpen && (
@@ -839,21 +1246,128 @@ export default function Home() {
               <h3 className="text-[10px] font-semibold uppercase tracking-widest text-[#9ca3af] mb-2 px-1">
                 Chat History
               </h3>
-              <div className="text-xs text-[#9ca3af] py-2 px-1">
-                No sessions yet
-              </div>
+              {conversations.filter((c) => c.mode === "chat").length === 0 ? (
+                <div className="text-xs text-[#9ca3af] py-2 px-1">
+                  No sessions yet
+                </div>
+              ) : (
+                <div className="space-y-0.5">
+                  {conversations
+                    .filter((c) => c.mode === "chat")
+                    .map((conv) => (
+                      <div
+                        key={conv.id}
+                        className={`group flex items-center gap-1 rounded-lg px-2 py-1.5 cursor-pointer transition-colors ${
+                          activeConversationId === conv.id
+                            ? "bg-[#e5e7eb]"
+                            : "hover:bg-[#f3f4f6]"
+                        }`}
+                      >
+                        <button
+                          onClick={() => handleLoadConversation(conv)}
+                          className="flex-1 text-left min-w-0"
+                        >
+                          <p className="text-xs text-[#4b5563] truncate">
+                            {conv.title}
+                          </p>
+                          <p className="text-[10px] text-[#9ca3af]">
+                            {new Date(conv.updated_at).toLocaleDateString()}
+                          </p>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteConversation(conv.id);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[#e5e7eb] transition-all text-[#9ca3af] hover:text-[#ef4444]"
+                          title="Delete"
+                        >
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              )}
 
               <div className="mt-4 mb-2 border-t border-[#ebebeb]" />
 
               <h3 className="text-[10px] font-semibold uppercase tracking-widest text-[#9ca3af] mb-2 px-1 mt-3">
                 Debate History
               </h3>
-              <div className="text-xs text-[#9ca3af] py-2 px-1">
-                No sessions yet
-              </div>
+              {conversations.filter((c) => c.mode === "debate").length === 0 ? (
+                <div className="text-xs text-[#9ca3af] py-2 px-1">
+                  No sessions yet
+                </div>
+              ) : (
+                <div className="space-y-0.5">
+                  {conversations
+                    .filter((c) => c.mode === "debate")
+                    .map((conv) => (
+                      <div
+                        key={conv.id}
+                        className={`group flex items-center gap-1 rounded-lg px-2 py-1.5 cursor-pointer transition-colors ${
+                          activeConversationId === conv.id
+                            ? "bg-[#e5e7eb]"
+                            : "hover:bg-[#f3f4f6]"
+                        }`}
+                      >
+                        <button
+                          onClick={() => handleLoadConversation(conv)}
+                          className="flex-1 text-left min-w-0"
+                        >
+                          <p className="text-xs text-[#4b5563] truncate">
+                            {conv.title}
+                          </p>
+                          <p className="text-[10px] text-[#9ca3af]">
+                            {new Date(conv.updated_at).toLocaleDateString()}
+                          </p>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteConversation(conv.id);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[#e5e7eb] transition-all text-[#9ca3af] hover:text-[#ef4444]"
+                          title="Delete"
+                        >
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              )}
             </>
           )}
         </div>
+
+        {/* Bottom actions */}
+        {sidebarOpen && (
+          <div className="px-3 py-3 border-t border-[#ebebeb] space-y-1">
+            <button
+              onClick={handleExportPdf}
+              disabled={isExportingPdf || conversations.length === 0}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[#f3f4f6] transition-colors text-xs text-[#4b5563] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              {isExportingPdf ? "Exporting..." : "Download All as PDF"}
+            </button>
+            <button
+              onClick={handleSignOut}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[#fee2e2] transition-colors text-xs text-[#6b7280] hover:text-[#dc2626]"
+            >
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+              </svg>
+              Sign Out
+            </button>
+          </div>
+        )}
       </aside>
 
       {/* ── Main Content ──────────────────────────────────────────────── */}
@@ -896,6 +1410,7 @@ export default function Home() {
             <DebateCanvas
               question={debateQuestion}
               rounds={debateRounds}
+              onDebateFinished={handleDebateFinished}
             />
           </div>
         ) : isLanding ? (
