@@ -15,6 +15,8 @@ interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  createdAt?: string;
+  generatedAt?: string;
   attachment?: {
     kind: "image" | "pdf";
     name: string;
@@ -23,6 +25,7 @@ interface Message {
   status?: string;
   reasoning?: string;
   isStreaming?: boolean;
+  isSearchingWeb?: boolean;
   convergent?: {
     status: "idle" | "running" | "converged" | "needs_input";
     score: number;
@@ -68,8 +71,6 @@ const BLOCKED_DEBATE_TOPIC_PATTERNS: RegExp[] = [
   /\b(bomb|explosive|terror attack|mass shooting|ethnic cleansing)\b/i,
   /\b(genocide|racial superiority|hate crime)\b/i,
   /\b(how to make meth|hard drug recipe|weapon build)\b/i,
-  /\b(election|vote|voting|campaign|candidate|senate|congress|prime minister|president)\b/i,
-  /\b(israel|palestine|ukraine|russia|china[-\s]?taiwan|geopolitical)\b/i,
 ];
 
 function validateDebateTopic(topic: string): { allowed: boolean; message?: string } {
@@ -103,6 +104,7 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [convergentEnabled, setConvergentEnabled] = useState(false);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [expandedConvergent, setExpandedConvergent] = useState<Record<string, boolean>>({});
   const [animatedConvergence, setAnimatedConvergence] = useState<Record<string, number>>({});
   const [copiedCodeKey, setCopiedCodeKey] = useState<string | null>(null);
@@ -225,6 +227,20 @@ export default function Home() {
   };
 
   const activeModel: AgenticModel = convergentEnabled ? "nemotron30b" : "nemotron9b";
+
+  const formatGeneratedAt = (iso: string | undefined) => {
+    if (!iso) return "";
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "";
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    const hours24 = date.getHours();
+    const minutes = String(date.getMinutes()).padStart(2, "0");
+    const ampm = hours24 >= 12 ? "PM" : "AM";
+    const hours12 = hours24 % 12 || 12;
+    return `Answer generated at ${year}-${month}-${day} ${hours12}:${minutes} ${ampm}`;
+  };
 
   const handleConvergentToggle = (enabled: boolean) => {
     setConvergentEnabled(enabled);
@@ -429,6 +445,7 @@ export default function Home() {
       id: Date.now().toString(),
       role: "user",
       content: trimmedInput || (fileToSend?.kind === "pdf" ? "Analyze this PDF." : "Analyze this image."),
+      createdAt: new Date().toISOString(),
       attachment: fileToSend
         ? {
             kind: fileToSend.kind,
@@ -442,6 +459,7 @@ export default function Home() {
       id: (Date.now() + 1).toString(),
       role: "assistant",
       content: "",
+      createdAt: new Date().toISOString(),
       status: fileToSend
         ? fileToSend.kind === "pdf"
           ? "Analyzing PDF."
@@ -482,6 +500,7 @@ export default function Home() {
           model: activeModel,
           thinking: convergentEnabled,
           convergentThinking: convergentEnabled,
+          webSearch: webSearchEnabled,
           imageDataUrl: fileToSend?.kind === "image" ? fileToSend.dataUrl : undefined,
           pdfDataUrl: fileToSend?.kind === "pdf" ? fileToSend.dataUrl : undefined,
         }),
@@ -527,6 +546,22 @@ export default function Home() {
                           ...msg,
                           status: typeof data.content === "string" ? data.content : msg.status,
                         }
+                      : msg
+                  )
+                );
+              } else if (data.type === "web-search-start") {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMessage.id
+                      ? { ...msg, isSearchingWeb: true, status: undefined }
+                      : msg
+                  )
+                );
+              } else if (data.type === "web-search-done") {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === assistantMessage.id
+                      ? { ...msg, isSearchingWeb: false }
                       : msg
                   )
                 );
@@ -632,6 +667,7 @@ export default function Home() {
                   )
                 );
               } else if (data.type === "done") {
+                const generatedAt = new Date().toISOString();
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === assistantMessage.id
@@ -648,6 +684,7 @@ export default function Home() {
                                     : msg.convergent.status,
                               }
                             : undefined,
+                          generatedAt,
                         }
                       : msg
                   )
@@ -679,6 +716,7 @@ export default function Home() {
                     : "Sorry, there was an error. Please try again.",
                 status: undefined,
                 isStreaming: false,
+                generatedAt: new Date().toISOString(),
               }
             : msg
         )
@@ -845,6 +883,9 @@ export default function Home() {
               </p>
               <p className="text-[11px] text-[#6b7280]">
                 ConvergentThinking {convergentEnabled ? "On" : "Off"}
+              </p>
+              <p className="text-[11px] text-[#6b7280]">
+                Web Search {webSearchEnabled ? "On" : "Off"}
               </p>
             </div>
           </div>
@@ -1074,6 +1115,19 @@ export default function Home() {
                       >
                         ConvergentThinking {convergentEnabled ? "On" : "Off"}
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => setWebSearchEnabled((prev) => !prev)}
+                        disabled={isLoading}
+                        tabIndex={isAgenticMode ? 0 : -1}
+                        className={`h-8 px-3 rounded-lg border text-xs font-medium transition-colors ${
+                          webSearchEnabled
+                            ? "bg-[#1f2937] border-[#1f2937] text-white"
+                            : "bg-[#fffaf2] border-[#e5e7eb] text-[#6b7280] hover:bg-[#f3f4f6]"
+                        } disabled:opacity-60`}
+                      >
+                        Web Search {webSearchEnabled ? "On" : "Off"}
+                      </button>
                       <span className="text-[11px] text-[#6b7280]">
                         Active: {convergentEnabled ? "30B" : "9B"}
                       </span>
@@ -1292,8 +1346,8 @@ export default function Home() {
                         </div>
                       </div>
                     ) : (
-                      <div className="space-y-3 max-w-3xl">
-                        <div className="flex items-center gap-2 text-xs text-[#76b900]">
+                      <div className="max-w-3xl rounded-2xl border border-[#e5e7eb] bg-white/90 px-4 py-3 shadow-[0_8px_24px_rgba(15,23,42,0.06)] backdrop-blur-sm space-y-3">
+                        <div className="flex items-center gap-2">
                           <span className="w-4 h-4 rounded overflow-hidden border border-[#d1d5db] bg-white flex items-center justify-center">
                             <Image
                               src="/nvidia_logo.png"
@@ -1303,14 +1357,36 @@ export default function Home() {
                               className="object-contain"
                             />
                           </span>
-                          Nemotron
+                          <div className="leading-tight">
+                            <p className="text-xs font-medium text-[#76b900]">Nemotron</p>
+                            {!message.isStreaming && message.generatedAt && (
+                              <p className="mt-0.5 text-[10px] text-[#9ca3af]">
+                                {formatGeneratedAt(message.generatedAt)}
+                              </p>
+                            )}
+                          </div>
                         </div>
 
                         {message.isStreaming && message.status && (
-                          <div className="px-2 sm:px-3">
+                          <div>
                             <div className="inline-flex items-center gap-2 rounded-full border border-[#e5e7eb] bg-[#f8fafc] px-3 py-1 text-xs text-[#64748b]">
                               <span className="w-1.5 h-1.5 rounded-full bg-[#6366f1] animate-pulse" />
                               {message.status}
+                            </div>
+                          </div>
+                        )}
+
+                        {message.isSearchingWeb && (
+                          <div>
+                            <div className="inline-flex items-center gap-3 rounded-2xl border border-[#e0e7ff] bg-gradient-to-r from-[#f0f4ff] to-[#f8faff] px-4 py-2 text-sm text-[#4338ca] shadow-sm">
+                              <svg className="w-4 h-4 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <circle cx="11" cy="11" r="8" strokeWidth={2} />
+                                <path strokeLinecap="round" strokeWidth={2} d="M21 21l-4.35-4.35" />
+                              </svg>
+                              <span className="font-medium">Searching the web</span>
+                              <div className="relative w-24 h-1.5 rounded-full bg-[#c7d2fe] overflow-hidden">
+                                <div className="absolute inset-0 rounded-full bg-gradient-to-r from-[#818cf8] via-[#6366f1] to-[#818cf8] web-search-shimmer" />
+                              </div>
                             </div>
                           </div>
                         )}
@@ -1520,7 +1596,7 @@ export default function Home() {
                           !message.content &&
                           !message.reasoning &&
                           !message.convergent && (
-                            <div className="px-2 sm:px-3">
+                            <div>
                               <div className="inline-flex items-center gap-1.5 rounded-full border border-[#e5e7eb] bg-[#f9fafb] px-3 py-1.5 text-[#6b7280]">
                                 <span className="h-1.5 w-1.5 rounded-full bg-current animate-bounce" />
                                 <span
@@ -1536,8 +1612,8 @@ export default function Home() {
                           )}
 
                         {(message.content || (!message.reasoning && !message.isStreaming)) && (
-                          <div className="px-2 sm:px-3">
-                            <div className="prose prose-sm max-w-none prose-headings:text-[#2d2d2d] prose-p:text-[#374151] prose-strong:text-[#1f2937] prose-code:bg-[#f3f4f6] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[#1f2937] prose-pre:text-gray-100">
+                          <div>
+                            <div className="prose prose-sm max-w-none prose-headings:text-[#2d2d2d] prose-p:text-[#334155] prose-p:leading-7 prose-strong:text-[#1f2937] prose-code:bg-[#f3f4f6] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-pre:bg-[#1f2937] prose-pre:text-gray-100">
                               {renderMarkdown(message.content || "...")}
                               {message.isStreaming && message.content && (
                                 <span className="inline-block w-2 h-4 bg-[#2d2d2d]/50 animate-pulse ml-1 align-middle" />
@@ -1664,6 +1740,18 @@ export default function Home() {
                     >
                       ConvergentThinking {convergentEnabled ? "On" : "Off"}
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => setWebSearchEnabled((prev) => !prev)}
+                      disabled={isLoading}
+                      className={`h-8 px-3 rounded-lg border text-xs font-medium transition-colors flex-shrink-0 ${
+                        webSearchEnabled
+                          ? "bg-[#1f2937] border-[#1f2937] text-white"
+                          : "bg-[#fffaf2] border-[#e5e7eb] text-[#6b7280] hover:bg-[#f3f4f6]"
+                      } disabled:opacity-60`}
+                    >
+                      Web Search {webSearchEnabled ? "On" : "Off"}
+                    </button>
                     <span className="text-[11px] text-[#6b7280]">
                       Active: {convergentEnabled ? "30B" : "9B"}
                     </span>
@@ -1677,5 +1765,4 @@ export default function Home() {
     </div>
   );
 }
-
 

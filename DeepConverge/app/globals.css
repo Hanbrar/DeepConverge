@@ -137,6 +137,17 @@ body {
   background: #9ca3af;
 }
 
+/* Web search shimmer animation */
+@keyframes web-search-wave {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.web-search-shimmer {
+  background-size: 200% 100%;
+  animation: web-search-wave 1.2s ease-in-out infinite;
+}
+
 /* Flow line animation */
 @keyframes flow {
   0% { stroke-dashoffset: 20; }

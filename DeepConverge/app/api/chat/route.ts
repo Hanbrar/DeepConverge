@@ -7,7 +7,7 @@ const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 const MODEL_IDS = {
   nemotron9b: "nvidia/nemotron-nano-9b-v2:free",
-  nemotron30b: "nvidia/nemotron-3-nano-30b-a3b",
+  nemotron30b: "nvidia/nemotron-3-nano-30b-a3b:free",
 } as const;
 const VISION_MODEL_ID = "nvidia/nemotron-nano-12b-v2-vl:free";
 
@@ -25,43 +25,28 @@ const CHAT_SYSTEM_PROMPT = [
   "Do not output code unless the user explicitly asks for code or asks to modify code.",
   "Avoid dictionary-style breakdowns unless asked.",
   "Prioritize direct execution guidance, clear structure, and next steps.",
+  "For sensitive conflicts or political topics, stay factual and balanced; do not advocate for one side.",
   "Do not expose private chain-of-thought.",
 ].join(" ");
 
 const CHAT_SAFETY_POLICY_PROMPT = [
-  "Safety policy (strict): refuse any request that could help harm people or enable wrongdoing.",
-  "Refuse instructions, strategy, code, plans, optimization, or troubleshooting for violence, weapons, explosives, terrorism, illegal drugs, sexual abuse/exploitation, hate/extremism, or self-harm.",
-  "Refuse even if the user frames it as hypothetical, educational, technical, fictional, or role-play.",
-  "For refused requests, give a brief refusal and optionally offer a safer alternative topic.",
-  "Allow benign academic and professional content, including healthcare and dentistry, as long as it does not enable harm.",
+  "Do not provide step-by-step instructions for building weapons, explosives, or synthesizing illegal drugs.",
+  "Do not provide instructions for self-harm or suicide methods.",
+  "For everything else, answer helpfully and factually.",
 ].join(" ");
 
-const CHAT_GUARD_MODEL: ChatModel = "nemotron9b";
+const CHAT_WEB_SEARCH_PROMPT = [
+  "Web search results have been provided as context below the user's question.",
+  "Use these results to ground your answer in current, factual information.",
+  "Cite sources naturally when relevant. Focus on answering the user's question directly.",
+].join(" ");
 
 const BLOCKED_CHAT_PATTERNS: RegExp[] = [
-  /\b(suicide|self-harm|kill myself|how to die)\b/i,
-  /\b(rape|sexual assault|child porn|cp|incest)\b/i,
-  /\b(bomb|explosive|terror attack|mass shooting|ethnic cleansing)\b/i,
-  /\b(genocide|racial superiority|hate crime|extremism)\b/i,
-  /\b(how to make meth|hard drug recipe|weapon build|make a weapon)\b/i,
-  /\b(assassinat(e|ion)|poison someone|stab someone)\b/i,
-  /\b(election|vote|voting|campaign|candidate|senate|congress|prime minister|president)\b/i,
-  /\b(israel|palestine|ukraine|russia|china[-\s]?taiwan|geopolitical)\b/i,
+  /\b(help me|teach me|show me|guide me|how (do|to) (i|we))\b.{0,80}\b(make|build|create|assemble|acquire)\b.{0,80}\b(bomb|explosive|weapon|gun|poison)\b/i,
+  /\b(how to|best way to|method to|ways to)\b.{0,60}\b(kill|murder|assassinate|stab|shoot|poison)\b/i,
+  /\b(make|cook|synthesize|produce)\b.{0,40}\b(meth|fentanyl|heroin|cocaine|illegal drug)\b/i,
+  /\b(how to|ways to|method to)\b.{0,60}\b(self-harm|kill myself|commit suicide)\b/i,
 ];
-
-type ChatGuardResult = {
-  allow: boolean;
-  category:
-    | "safe"
-    | "violence_or_abuse"
-    | "sexual_or_exploitative"
-    | "hate_or_extremism"
-    | "self_harm"
-    | "illegal_activity"
-    | "high_risk_advice"
-    | "other";
-  reason: string;
-};
 
 const MAX_CONVERGENCE_ROUNDS = 4;
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -83,11 +68,111 @@ function isShortSocialMessage(text: string): boolean {
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function withSafetySystem(message: string): ChatMessage {
+function withSafetySystem(
+  message: string,
+  opts?: { webSearchEnabled?: boolean }
+): ChatMessage {
+  const parts = [message, CHAT_SAFETY_POLICY_PROMPT];
+  if (opts?.webSearchEnabled) {
+    parts.push(CHAT_WEB_SEARCH_PROMPT);
+  }
   return {
     role: "system",
-    content: `${message} ${CHAT_SAFETY_POLICY_PROMPT}`,
+    content: parts.join(" "),
   };
+}
+
+interface WebSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+async function searchWeb(
+  query: string,
+  maxResults = 6
+): Promise<WebSearchResult[]> {
+  const results: WebSearchResult[] = [];
+
+  // Strategy 1: DuckDuckGo HTML search (real web results, no API key)
+  try {
+    const ddgUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const resp = await fetch(ddgUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "text/html",
+      },
+    });
+    if (resp.ok) {
+      const html = await resp.text();
+      const titleRe =
+        /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+      const snippetRe =
+        /<a[^>]+class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
+      const titles = [...html.matchAll(titleRe)];
+      const snippets = [...html.matchAll(snippetRe)];
+      const cleanHtml = (s: string) =>
+        s
+          .replace(/<[^>]+>/g, "")
+          .replace(/&amp;/g, "&")
+          .replace(/&lt;/g, "<")
+          .replace(/&gt;/g, ">")
+          .replace(/&#x27;/g, "'")
+          .replace(/&quot;/g, '"')
+          .trim();
+      for (let i = 0; i < Math.min(titles.length, maxResults); i++) {
+        const rawUrl = titles[i][1];
+        const actualUrl = rawUrl.includes("uddg=")
+          ? decodeURIComponent(
+              rawUrl.split("uddg=")[1]?.split("&")[0] || rawUrl
+            )
+          : rawUrl;
+        results.push({
+          title: cleanHtml(titles[i][2]),
+          url: actualUrl,
+          snippet: snippets[i] ? cleanHtml(snippets[i][1]) : "",
+        });
+      }
+    }
+  } catch (error) {
+    console.error("[web-search] DuckDuckGo error:", error);
+  }
+
+  // Strategy 2: Wikipedia fallback if DuckDuckGo returned nothing
+  if (results.length === 0) {
+    try {
+      const wikiUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=${maxResults}&origin=*`;
+      const resp = await fetch(wikiUrl);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data?.query?.search) {
+          for (const item of data.query.search) {
+            results.push({
+              title: item.title,
+              url: `https://en.wikipedia.org/wiki/${encodeURIComponent(item.title.replace(/ /g, "_"))}`,
+              snippet: (item.snippet || "")
+                .replace(/<[^>]+>/g, "")
+                .slice(0, 200),
+            });
+          }
+        }
+      }
+    } catch (error) {
+      console.error("[web-search] Wikipedia fallback error:", error);
+    }
+  }
+
+  console.log(`[web-search] "${query}" → ${results.length} results`);
+  return results;
+}
+
+function formatSearchContext(results: WebSearchResult[]): string {
+  if (results.length === 0) return "";
+  const lines = results.map(
+    (r, i) => `[${i + 1}] ${r.title}\n    ${r.url}\n    ${r.snippet}`
+  );
+  return `Web search results:\n${lines.join("\n\n")}`;
 }
 
 function createDoneSseResponse(content: string) {
@@ -191,103 +276,6 @@ function parseJudgeJson(raw: string): {
   } catch {
     return null;
   }
-}
-
-function parseChatGuardJson(raw: string): ChatGuardResult | null {
-  const fenced = raw.match(/```json\s*([\s\S]*?)```/i)?.[1];
-  const candidate =
-    fenced ??
-    raw.match(/\{[\s\S]*\}/)?.[0] ??
-    "";
-  if (!candidate) return null;
-
-  try {
-    const parsed = JSON.parse(candidate) as Record<string, unknown>;
-    const categoryRaw =
-      typeof parsed.category === "string" ? parsed.category : "other";
-    const category: ChatGuardResult["category"] =
-      categoryRaw === "safe" ||
-      categoryRaw === "violence_or_abuse" ||
-      categoryRaw === "sexual_or_exploitative" ||
-      categoryRaw === "hate_or_extremism" ||
-      categoryRaw === "self_harm" ||
-      categoryRaw === "illegal_activity" ||
-      categoryRaw === "high_risk_advice" ||
-      categoryRaw === "other"
-        ? categoryRaw
-        : "other";
-
-    return {
-      allow: parsed.allow === true,
-      category,
-      reason:
-        typeof parsed.reason === "string" && parsed.reason.trim()
-          ? parsed.reason.trim()
-          : "Request did not pass safety policy.",
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function moderateUserMessageWithGuardModel(params: {
-  apiKey: string;
-  message: string;
-}): Promise<ChatGuardResult> {
-  const response = await fetch(OPENROUTER_API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${params.apiKey}`,
-      "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
-      "X-Title": "DeepConverge Chat Guard",
-    },
-    body: JSON.stringify({
-      model: MODEL_IDS[CHAT_GUARD_MODEL],
-      stream: false,
-      temperature: 0,
-      max_tokens: 200,
-      reasoning: { effort: "none", exclude: true },
-      messages: [
-        {
-          role: "system",
-          content: [
-            "You are a strict safety gate for a general chat assistant.",
-            "Decide whether the user request is safe to answer.",
-            "Block harmful requests: violence, weapons, explosives, terrorism, illegal drug creation, sexual abuse/exploitation, hate/extremism, self-harm, and other high-risk wrongdoing.",
-            "Also block politically sensitive or geopolitical requests.",
-            "If disallowed, set allow=false.",
-            "Return strict JSON only:",
-            '{"allow": boolean, "category": "safe|violence_or_abuse|sexual_or_exploitative|hate_or_extremism|self_harm|illegal_activity|high_risk_advice|other", "reason": "short reason"}',
-          ].join(" "),
-        },
-        {
-          role: "user",
-          content: `User message: "${params.message}"`,
-        },
-      ],
-    }),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Chat guard API error: ${response.status} - ${errText}`);
-  }
-
-  const payload = await response.json();
-  const firstChoice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
-  const raw =
-    extractText(firstChoice?.message?.content) ||
-    extractText(firstChoice?.message?.reasoning);
-  const parsed = parseChatGuardJson(raw);
-  if (parsed) return parsed;
-
-  // Fail closed if guard output is malformed.
-  return {
-    allow: false,
-    category: "other",
-    reason: "Safety guard could not validate this request safely.",
-  };
 }
 
 function estimateAgreementScore(a: string, b: string): number {
@@ -760,6 +748,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const message = typeof body?.message === "string" ? body.message.trim() : "";
     const convergentThinking = body?.convergentThinking === true;
+    const webSearchEnabled = body?.webSearch === true;
     const imageDataUrlRaw =
       typeof body?.imageDataUrl === "string" ? body.imageDataUrl.trim() : "";
     const pdfDataUrlRaw =
@@ -813,26 +802,11 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      try {
-        const guard = await moderateUserMessageWithGuardModel({
-          apiKey,
-          message: trimmedUserMessage,
-        });
-        if (!guard.allow) {
-          return createDoneSseResponse(
-            "I can't help with harmful requests (violence, weapons, terrorism, illegal drugs, abuse, or self-harm). I can help with safe academic or practical topics instead."
-          );
-        }
-      } catch (error) {
-        console.error("Chat safety guard error:", error);
-        return createDoneSseResponse(
-          "I can't process this request right now because safety checks are unavailable. Please try again."
-        );
-      }
     }
 
     // Product rule: Convergent Off -> 9B chat model, Convergent On -> 30B workflow model.
     const resolvedModel: ChatModel = convergentThinking ? "nemotron30b" : "nemotron9b";
+    const resolvedModelId = MODEL_IDS[resolvedModel];
 
     if (convergentThinking) {
       const encoder = new TextEncoder();
@@ -864,7 +838,7 @@ export async function POST(request: NextRequest) {
           let finalContent = "";
 
           try {
-            const convergentModel = MODEL_IDS.nemotron30b;
+            const convergentModel = MODEL_IDS["nemotron30b"];
             let taskMessage = rawTask;
 
             if (hasImage) {
@@ -913,6 +887,22 @@ export async function POST(request: NextRequest) {
               taskMessage = buildPdfAugmentedTask(taskMessage, pdfSummary);
             }
 
+            // ── Web search phase (convergent) ──
+            if (webSearchEnabled) {
+              send({ type: "web-search-start" });
+              const searchResults = await searchWeb(taskMessage);
+              send({
+                type: "web-search-done",
+                results: searchResults.map((r) => ({
+                  title: r.title,
+                  url: r.url,
+                })),
+              });
+              if (searchResults.length > 0) {
+                taskMessage = `${formatSearchContext(searchResults)}\n\nUser question: ${taskMessage}`;
+              }
+            }
+
             if (!hasImage && !hasPdf && isShortSocialMessage(rawTask)) {
               send({
                 type: "convergent_start",
@@ -930,7 +920,9 @@ export async function POST(request: NextRequest) {
                   maxTokens: 120,
                   reasoning: { effort: "none", exclude: true },
                   messages: [
-                    withSafetySystem(CHAT_SYSTEM_PROMPT),
+                    withSafetySystem(CHAT_SYSTEM_PROMPT, {
+                      webSearchEnabled,
+                    }),
                     {
                       role: "user",
                       content: rawTask,
@@ -967,7 +959,8 @@ export async function POST(request: NextRequest) {
               reasoning: { effort: "none", exclude: true },
               messages: [
                 withSafetySystem(
-                  "You are the Judge in a convergent-thinking multi-agent workflow. State task framing, evaluation criteria, and convergence target in 3 concise bullets. Keep this productivity-focused and avoid code unless explicitly requested."
+                  "You are the Judge in a convergent-thinking multi-agent workflow. State task framing, evaluation criteria, and convergence target in 3 concise bullets. Keep this productivity-focused and avoid code unless explicitly requested.",
+                  { webSearchEnabled }
                 ),
                 {
                   role: "user",
@@ -1008,7 +1001,8 @@ export async function POST(request: NextRequest) {
                 reasoning: { effort: "none", exclude: true },
                 messages: [
                   withSafetySystem(
-                    "You are Debater A. Produce a concise, practical proposal focused on execution and measurable outcomes. Do not generate code unless explicitly requested."
+                    "You are Debater A. Produce a concise, practical proposal focused on execution and measurable outcomes. Do not generate code unless explicitly requested.",
+                    { webSearchEnabled }
                   ),
                   {
                     role: "user",
@@ -1032,7 +1026,8 @@ export async function POST(request: NextRequest) {
                 reasoning: { effort: "none", exclude: true },
                 messages: [
                   withSafetySystem(
-                    "You are Debater B. Stress-test assumptions, identify risks, and propose a competing practical path. Do not generate code unless explicitly requested."
+                    "You are Debater B. Stress-test assumptions, identify risks, and propose a competing practical path. Do not generate code unless explicitly requested.",
+                    { webSearchEnabled }
                   ),
                   {
                     role: "user",
@@ -1056,7 +1051,8 @@ export async function POST(request: NextRequest) {
                 reasoning: { effort: "none", exclude: true },
                 messages: [
                   withSafetySystem(
-                    "You are the Judge. Compare Debater A vs Debater B and return strict JSON only with keys: convergence_score (0-100), converged (boolean), synthesis, direction_for_next_round, unresolved_points (string array), clarifying_questions (string array), final_direction. Keep synthesis concise and avoid code unless explicitly requested."
+                    "You are the Judge. Compare Debater A vs Debater B and return strict JSON only with keys: convergence_score (0-100), converged (boolean), synthesis, direction_for_next_round, unresolved_points (string array), clarifying_questions (string array), final_direction. Keep synthesis concise and avoid code unless explicitly requested.",
+                    { webSearchEnabled }
                   ),
                   {
                     role: "user",
@@ -1118,7 +1114,8 @@ export async function POST(request: NextRequest) {
                 reasoning: { effort: "none", exclude: true },
                 messages: [
                   withSafetySystem(
-                    "You are the Execution Agent. Turn the judge's converged direction into the final response for the user. Be concrete, actionable, concise, and chat-aware. Do not include code unless explicitly requested."
+                    "You are the Execution Agent. Turn the judge's converged direction into the final response for the user. Be concrete, actionable, concise, and chat-aware. Do not include code unless explicitly requested.",
+                    { webSearchEnabled }
                   ),
                   {
                     role: "user",
@@ -1233,7 +1230,7 @@ export async function POST(request: NextRequest) {
       }
       const pdfSummary = await summarizePdfForTask({
         apiKey,
-        model: MODEL_IDS[resolvedModel],
+        model: resolvedModelId,
         userMessage: rawTask,
         extractedText: extraction.text,
       });
@@ -1294,62 +1291,6 @@ export async function POST(request: NextRequest) {
         },
       });
     }
-    const baseMessages: ChatMessage[] = [
-      withSafetySystem(CHAT_SYSTEM_PROMPT),
-      {
-        role: "user",
-        content: nonConvergentTask,
-      },
-    ];
-    const buildStreamPayload = (includeReasoning: boolean) => {
-      const payload: Record<string, unknown> = {
-        model: MODEL_IDS[resolvedModel],
-        messages: baseMessages,
-        stream: true,
-        temperature: enableThinking ? 0.7 : 0.45,
-        max_tokens: resolvedModel === "nemotron9b" ? 4096 : 8192,
-      };
-      if (includeReasoning && enableThinking) {
-        payload.reasoning = { effort: "high" };
-      }
-      return payload;
-    };
-
-    const requestHeaders = {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
-      "X-Title": "DeepConverge AI",
-    };
-
-    let response = await fetch(OPENROUTER_API_URL, {
-      method: "POST",
-      headers: requestHeaders,
-      body: JSON.stringify(buildStreamPayload(true)),
-    });
-
-    if (!response.ok && resolvedModel === "nemotron9b" && !enableThinking) {
-      const initialError = await response.text();
-      console.warn(
-        "9B request failed with default payload; retrying without reasoning hints:",
-        initialError
-      );
-      response = await fetch(OPENROUTER_API_URL, {
-        method: "POST",
-        headers: requestHeaders,
-        body: JSON.stringify(buildStreamPayload(false)),
-      });
-    }
-
-    if (!response.ok) {
-      const error = await response.text();
-      console.error("OpenRouter error:", error);
-      return new Response(JSON.stringify({ error: `API error: ${response.status}` }), {
-        status: response.status,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
@@ -1364,76 +1305,155 @@ export async function POST(request: NextRequest) {
             isClosed = true;
           }
         };
-        const safeEnqueue = (payload: Record<string, unknown>) => {
+        const send = (payload: Record<string, unknown>) => {
           if (isClosed) return;
           try {
             controller.enqueue(
               encoder.encode(`data: ${JSON.stringify(payload)}\n\n`)
             );
           } catch {
-            // Avoid throwing ERR_INVALID_STATE after disconnect/close.
             isClosed = true;
           }
         };
 
-        const reader = response.body?.getReader();
-        if (!reader) {
-          safeClose();
-          return;
-        }
-
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let reasoning = "";
-        let content = "";
-        const processLine = (line: string) => {
-          if (!line.startsWith("data: ")) return;
-          const data = line.slice(6);
-          if (data === "[DONE]") return;
-
-          try {
-            const parsed = JSON.parse(data);
-            const delta = parsed.choices?.[0]?.delta;
-            const reasoningChunk = delta?.reasoning || "";
-            if (enableThinking && reasoningChunk) {
-              reasoning += reasoningChunk;
-              safeEnqueue({ type: "reasoning", content: reasoning });
-            }
-
-            const contentChunk = delta?.content || "";
-            if (contentChunk) {
-              content += contentChunk;
-              safeEnqueue({ type: "content", content });
-            }
-          } catch {
-            // Skip invalid JSON
-          }
-        };
-
         try {
+          // ── Web search phase ──
+          let searchContext = "";
+          if (webSearchEnabled) {
+            send({ type: "web-search-start" });
+            const searchResults = await searchWeb(nonConvergentTask);
+            send({
+              type: "web-search-done",
+              results: searchResults.map((r) => ({
+                title: r.title,
+                url: r.url,
+              })),
+            });
+            if (searchResults.length > 0) {
+              searchContext = formatSearchContext(searchResults);
+            }
+          }
+
+          const userContent = searchContext
+            ? `${searchContext}\n\nUser question: ${nonConvergentTask}`
+            : nonConvergentTask;
+
+          const messages: ChatMessage[] = [
+            withSafetySystem(CHAT_SYSTEM_PROMPT, {
+              webSearchEnabled: !!searchContext,
+            }),
+            { role: "user", content: userContent },
+          ];
+
+          const requestHeaders = {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+            "HTTP-Referer":
+              process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
+            "X-Title": "DeepConverge AI",
+          };
+
+          const buildPayload = (includeReasoning: boolean) => {
+            const p: Record<string, unknown> = {
+              model: resolvedModelId,
+              messages,
+              stream: true,
+              temperature: enableThinking ? 0.7 : 0.45,
+              max_tokens: resolvedModel === "nemotron9b" ? 4096 : 8192,
+            };
+            if (includeReasoning && enableThinking) {
+              p.reasoning = { effort: "high" };
+            }
+            return p;
+          };
+
+          let response = await fetch(OPENROUTER_API_URL, {
+            method: "POST",
+            headers: requestHeaders,
+            body: JSON.stringify(buildPayload(true)),
+          });
+
+          if (
+            !response.ok &&
+            resolvedModel === "nemotron9b" &&
+            !enableThinking
+          ) {
+            const initialError = await response.text();
+            console.warn(
+              "9B request failed; retrying without reasoning hints:",
+              initialError
+            );
+            response = await fetch(OPENROUTER_API_URL, {
+              method: "POST",
+              headers: requestHeaders,
+              body: JSON.stringify(buildPayload(false)),
+            });
+          }
+
+          if (!response.ok) {
+            const errText = await response.text();
+            console.error("OpenRouter error:", errText);
+            send({
+              type: "content",
+              content:
+                "Sorry, there was an error connecting to the AI model. Please try again.",
+            });
+            send({ type: "done", reasoning: "", content: "" });
+            safeClose();
+            return;
+          }
+
+          // ── Stream OpenRouter response ──
+          const reader = response.body?.getReader();
+          if (!reader) {
+            safeClose();
+            return;
+          }
+
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let reasoning = "";
+          let content = "";
+          const processLine = (line: string) => {
+            if (!line.startsWith("data: ")) return;
+            const data = line.slice(6);
+            if (data === "[DONE]") return;
+
+            try {
+              const parsed = JSON.parse(data);
+              const delta = parsed.choices?.[0]?.delta;
+              const reasoningChunk = delta?.reasoning || "";
+              if (enableThinking && reasoningChunk) {
+                reasoning += reasoningChunk;
+                send({ type: "reasoning", content: reasoning });
+              }
+
+              const contentChunk = delta?.content || "";
+              if (contentChunk) {
+                content += contentChunk;
+                send({ type: "content", content });
+              }
+            } catch {
+              // Skip invalid JSON
+            }
+          };
+
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split("\n");
             buffer = lines.pop() || "";
-
-            for (const line of lines) {
-              processLine(line);
-            }
+            for (const line of lines) processLine(line);
           }
 
-          // Flush any remaining decoder/buffer tail to avoid clipped last tokens.
           buffer += decoder.decode();
           if (buffer.trim()) {
-            const tailLines = buffer.split("\n");
-            for (const line of tailLines) {
+            for (const line of buffer.split("\n"))
               processLine(line.trimEnd());
-            }
           }
 
-          safeEnqueue({ type: "done", reasoning, content });
+          send({ type: "done", reasoning, content });
           safeClose();
         } catch (error) {
           console.error("Stream error:", error);
