@@ -15,11 +15,26 @@ function SignInForm() {
   const [loading, setLoading] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
+  // Waitlist state
+  const [showWaitlist, setShowWaitlist] = useState(false);
+  const [waitlistEmail, setWaitlistEmail] = useState("");
+  const [waitlistLoading, setWaitlistLoading] = useState(false);
+  const [waitlistSubmitted, setWaitlistSubmitted] = useState(false);
+  const [waitlistError, setWaitlistError] = useState<string | null>(null);
+
   // Show error from OAuth callback redirect
   useEffect(() => {
     const callbackError = searchParams.get("error");
     if (callbackError) {
-      setError(callbackError);
+      // If user was blocked by Google Testing mode, show waitlist
+      if (
+        callbackError.toLowerCase().includes("access_denied") ||
+        callbackError.toLowerCase().includes("access blocked")
+      ) {
+        setShowWaitlist(true);
+      } else {
+        setError(callbackError);
+      }
     }
   }, [searchParams]);
 
@@ -78,6 +93,123 @@ function SignInForm() {
       setError("Google sign-in failed. Please try again.");
     }
   };
+
+  const handleWaitlistSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!waitlistEmail.trim()) return;
+
+    setWaitlistError(null);
+    setWaitlistLoading(true);
+
+    try {
+      const res = await fetch("/api/waitlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: waitlistEmail.trim() }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        setWaitlistSubmitted(true);
+      } else {
+        setWaitlistError(data.error || "Something went wrong.");
+      }
+    } catch {
+      setWaitlistError("Something went wrong. Please try again.");
+    } finally {
+      setWaitlistLoading(false);
+    }
+  };
+
+  // Waitlist view
+  if (showWaitlist) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#fffaf3] px-4">
+        <div className="w-full max-w-sm">
+          <div className="flex flex-col items-center mb-8">
+            <Image
+              src="/bestlogo.png"
+              alt="DeepConverge logo"
+              width={72}
+              height={72}
+              className="object-contain mb-3"
+              priority
+            />
+            <span className="inline-block px-3 py-1 rounded-full bg-[#7c6bf5]/10 text-[#7c6bf5] text-xs font-semibold mb-3">
+              BETA
+            </span>
+            <h1 className="text-2xl font-bold text-[#2d2d2d]">
+              Join the Waitlist
+            </h1>
+            <p className="text-sm text-[#6b7280] mt-2 text-center leading-relaxed">
+              DeepConverge is currently in closed beta testing. Enter your email
+              below and we&apos;ll give you access within a few hours.
+            </p>
+          </div>
+
+          {waitlistSubmitted ? (
+            <div className="text-center">
+              <div className="w-12 h-12 rounded-full bg-[#ecfdf5] flex items-center justify-center mx-auto mb-4">
+                <svg className="w-6 h-6 text-[#059669]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <p className="text-sm font-medium text-[#2d2d2d]">
+                You&apos;re on the list!
+              </p>
+              <p className="text-xs text-[#6b7280] mt-1">
+                We&apos;ll send you access soon. Thank you for your interest!
+              </p>
+            </div>
+          ) : (
+            <form onSubmit={handleWaitlistSubmit} className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-[#4b5563] mb-1">
+                  Email
+                </label>
+                <input
+                  type="email"
+                  value={waitlistEmail}
+                  onChange={(e) => setWaitlistEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  required
+                  className="w-full px-4 py-2.5 rounded-xl border border-[#e5e7eb] bg-white outline-none focus:ring-2 focus:ring-[#7c6bf5]/30 focus:border-[#7c6bf5] text-sm text-[#2d2d2d] placeholder-[#9ca3af]"
+                />
+              </div>
+
+              {waitlistError && (
+                <p className="text-xs text-[#dc2626] bg-[#fef2f2] border border-[#fecaca] rounded-lg px-3 py-2">
+                  {waitlistError}
+                </p>
+              )}
+
+              <button
+                type="submit"
+                disabled={waitlistLoading}
+                className="w-full py-3 rounded-xl bg-[#7c6bf5] text-white text-sm font-medium hover:bg-[#6c5ce7] transition-colors disabled:opacity-50"
+              >
+                {waitlistLoading ? "Submitting..." : "Join Waitlist"}
+              </button>
+            </form>
+          )}
+
+          <button
+            onClick={() => setShowWaitlist(false)}
+            className="mt-5 w-full text-center text-xs text-[#9ca3af] hover:text-[#6b7280] transition-colors"
+          >
+            Back to sign in
+          </button>
+
+          <button
+            onClick={() => router.push("/")}
+            className="mt-2 w-full text-center text-xs text-[#9ca3af] hover:text-[#6b7280] transition-colors"
+          >
+            Back to home
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-[#fffaf3] px-4">
@@ -201,6 +333,17 @@ function SignInForm() {
             className="text-[#7c6bf5] font-medium hover:underline"
           >
             {isSignUp ? "Sign In" : "Sign Up"}
+          </button>
+        </p>
+
+        {/* Join beta waitlist link */}
+        <p className="text-center text-xs text-[#6b7280] mt-3">
+          Want to join the beta?{" "}
+          <button
+            onClick={() => setShowWaitlist(true)}
+            className="text-[#7c6bf5] font-medium hover:underline"
+          >
+            Join Waitlist
           </button>
         </p>
 
