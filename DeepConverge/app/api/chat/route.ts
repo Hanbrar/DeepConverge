@@ -28,6 +28,41 @@ const CHAT_SYSTEM_PROMPT = [
   "Do not expose private chain-of-thought.",
 ].join(" ");
 
+const CHAT_SAFETY_POLICY_PROMPT = [
+  "Safety policy (strict): refuse any request that could help harm people or enable wrongdoing.",
+  "Refuse instructions, strategy, code, plans, optimization, or troubleshooting for violence, weapons, explosives, terrorism, illegal drugs, sexual abuse/exploitation, hate/extremism, or self-harm.",
+  "Refuse even if the user frames it as hypothetical, educational, technical, fictional, or role-play.",
+  "For refused requests, give a brief refusal and optionally offer a safer alternative topic.",
+  "Allow benign academic and professional content, including healthcare and dentistry, as long as it does not enable harm.",
+].join(" ");
+
+const CHAT_GUARD_MODEL: ChatModel = "nemotron9b";
+
+const BLOCKED_CHAT_PATTERNS: RegExp[] = [
+  /\b(suicide|self-harm|kill myself|how to die)\b/i,
+  /\b(rape|sexual assault|child porn|cp|incest)\b/i,
+  /\b(bomb|explosive|terror attack|mass shooting|ethnic cleansing)\b/i,
+  /\b(genocide|racial superiority|hate crime|extremism)\b/i,
+  /\b(how to make meth|hard drug recipe|weapon build|make a weapon)\b/i,
+  /\b(assassinat(e|ion)|poison someone|stab someone)\b/i,
+  /\b(election|vote|voting|campaign|candidate|senate|congress|prime minister|president)\b/i,
+  /\b(israel|palestine|ukraine|russia|china[-\s]?taiwan|geopolitical)\b/i,
+];
+
+type ChatGuardResult = {
+  allow: boolean;
+  category:
+    | "safe"
+    | "violence_or_abuse"
+    | "sexual_or_exploitative"
+    | "hate_or_extremism"
+    | "self_harm"
+    | "illegal_activity"
+    | "high_risk_advice"
+    | "other";
+  reason: string;
+};
+
 const MAX_CONVERGENCE_ROUNDS = 4;
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const PDF_MAX_CHARS = 60000;
@@ -47,6 +82,13 @@ function isShortSocialMessage(text: string): boolean {
 }
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function withSafetySystem(message: string): ChatMessage {
+  return {
+    role: "system",
+    content: `${message} ${CHAT_SAFETY_POLICY_PROMPT}`,
+  };
+}
 
 function createDoneSseResponse(content: string) {
   const encoder = new TextEncoder();
@@ -149,6 +191,103 @@ function parseJudgeJson(raw: string): {
   } catch {
     return null;
   }
+}
+
+function parseChatGuardJson(raw: string): ChatGuardResult | null {
+  const fenced = raw.match(/```json\s*([\s\S]*?)```/i)?.[1];
+  const candidate =
+    fenced ??
+    raw.match(/\{[\s\S]*\}/)?.[0] ??
+    "";
+  if (!candidate) return null;
+
+  try {
+    const parsed = JSON.parse(candidate) as Record<string, unknown>;
+    const categoryRaw =
+      typeof parsed.category === "string" ? parsed.category : "other";
+    const category: ChatGuardResult["category"] =
+      categoryRaw === "safe" ||
+      categoryRaw === "violence_or_abuse" ||
+      categoryRaw === "sexual_or_exploitative" ||
+      categoryRaw === "hate_or_extremism" ||
+      categoryRaw === "self_harm" ||
+      categoryRaw === "illegal_activity" ||
+      categoryRaw === "high_risk_advice" ||
+      categoryRaw === "other"
+        ? categoryRaw
+        : "other";
+
+    return {
+      allow: parsed.allow === true,
+      category,
+      reason:
+        typeof parsed.reason === "string" && parsed.reason.trim()
+          ? parsed.reason.trim()
+          : "Request did not pass safety policy.",
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function moderateUserMessageWithGuardModel(params: {
+  apiKey: string;
+  message: string;
+}): Promise<ChatGuardResult> {
+  const response = await fetch(OPENROUTER_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${params.apiKey}`,
+      "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
+      "X-Title": "DeepConverge Chat Guard",
+    },
+    body: JSON.stringify({
+      model: MODEL_IDS[CHAT_GUARD_MODEL],
+      stream: false,
+      temperature: 0,
+      max_tokens: 200,
+      reasoning: { effort: "none", exclude: true },
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You are a strict safety gate for a general chat assistant.",
+            "Decide whether the user request is safe to answer.",
+            "Block harmful requests: violence, weapons, explosives, terrorism, illegal drug creation, sexual abuse/exploitation, hate/extremism, self-harm, and other high-risk wrongdoing.",
+            "Also block politically sensitive or geopolitical requests.",
+            "If disallowed, set allow=false.",
+            "Return strict JSON only:",
+            '{"allow": boolean, "category": "safe|violence_or_abuse|sexual_or_exploitative|hate_or_extremism|self_harm|illegal_activity|high_risk_advice|other", "reason": "short reason"}',
+          ].join(" "),
+        },
+        {
+          role: "user",
+          content: `User message: "${params.message}"`,
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Chat guard API error: ${response.status} - ${errText}`);
+  }
+
+  const payload = await response.json();
+  const firstChoice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
+  const raw =
+    extractText(firstChoice?.message?.content) ||
+    extractText(firstChoice?.message?.reasoning);
+  const parsed = parseChatGuardJson(raw);
+  if (parsed) return parsed;
+
+  // Fail closed if guard output is malformed.
+  return {
+    allow: false,
+    category: "other",
+    reason: "Safety guard could not validate this request safely.",
+  };
 }
 
 function estimateAgreementScore(a: string, b: string): number {
@@ -665,6 +804,33 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    const rawTask = message || "Analyze the uploaded file.";
+    const trimmedUserMessage = message.trim();
+    if (trimmedUserMessage) {
+      if (BLOCKED_CHAT_PATTERNS.some((pattern) => pattern.test(trimmedUserMessage))) {
+        return createDoneSseResponse(
+          "I can't help with harmful requests (violence, weapons, terrorism, illegal drugs, abuse, or self-harm). I can help with safe academic or practical topics instead."
+        );
+      }
+
+      try {
+        const guard = await moderateUserMessageWithGuardModel({
+          apiKey,
+          message: trimmedUserMessage,
+        });
+        if (!guard.allow) {
+          return createDoneSseResponse(
+            "I can't help with harmful requests (violence, weapons, terrorism, illegal drugs, abuse, or self-harm). I can help with safe academic or practical topics instead."
+          );
+        }
+      } catch (error) {
+        console.error("Chat safety guard error:", error);
+        return createDoneSseResponse(
+          "I can't process this request right now because safety checks are unavailable. Please try again."
+        );
+      }
+    }
+
     // Product rule: Convergent Off -> 9B chat model, Convergent On -> 30B workflow model.
     const resolvedModel: ChatModel = convergentThinking ? "nemotron30b" : "nemotron9b";
 
@@ -699,7 +865,6 @@ export async function POST(request: NextRequest) {
 
           try {
             const convergentModel = MODEL_IDS.nemotron30b;
-            const rawTask = message || "Analyze the uploaded file.";
             let taskMessage = rawTask;
 
             if (hasImage) {
@@ -765,10 +930,7 @@ export async function POST(request: NextRequest) {
                   maxTokens: 120,
                   reasoning: { effort: "none", exclude: true },
                   messages: [
-                    {
-                      role: "system",
-                      content: CHAT_SYSTEM_PROMPT,
-                    },
+                    withSafetySystem(CHAT_SYSTEM_PROMPT),
                     {
                       role: "user",
                       content: rawTask,
@@ -804,11 +966,9 @@ export async function POST(request: NextRequest) {
               maxTokens: 350,
               reasoning: { effort: "none", exclude: true },
               messages: [
-                {
-                  role: "system",
-                  content:
-                    "You are the Judge in a convergent-thinking multi-agent workflow. State task framing, evaluation criteria, and convergence target in 3 concise bullets. Keep this productivity-focused and avoid code unless explicitly requested.",
-                },
+                withSafetySystem(
+                  "You are the Judge in a convergent-thinking multi-agent workflow. State task framing, evaluation criteria, and convergence target in 3 concise bullets. Keep this productivity-focused and avoid code unless explicitly requested."
+                ),
                 {
                   role: "user",
                   content: `Task: ${taskMessage}`,
@@ -847,11 +1007,9 @@ export async function POST(request: NextRequest) {
                 maxTokens: 700,
                 reasoning: { effort: "none", exclude: true },
                 messages: [
-                  {
-                    role: "system",
-                    content:
-                      "You are Debater A. Produce a concise, practical proposal focused on execution and measurable outcomes. Do not generate code unless explicitly requested.",
-                  },
+                  withSafetySystem(
+                    "You are Debater A. Produce a concise, practical proposal focused on execution and measurable outcomes. Do not generate code unless explicitly requested."
+                  ),
                   {
                     role: "user",
                     content: `Task: ${taskMessage}\n\nCurrent context:\n${contextTail}\n\nJudge direction:\n${latestJudgeDirection}\n\nGive your round-${round} position.`,
@@ -873,11 +1031,9 @@ export async function POST(request: NextRequest) {
                 maxTokens: 700,
                 reasoning: { effort: "none", exclude: true },
                 messages: [
-                  {
-                    role: "system",
-                    content:
-                      "You are Debater B. Stress-test assumptions, identify risks, and propose a competing practical path. Do not generate code unless explicitly requested.",
-                  },
+                  withSafetySystem(
+                    "You are Debater B. Stress-test assumptions, identify risks, and propose a competing practical path. Do not generate code unless explicitly requested."
+                  ),
                   {
                     role: "user",
                     content: `Task: ${taskMessage}\n\nContext:\n${contextTail}\n\nDebater A round-${round}:\n${latestA}\n\nJudge direction:\n${latestJudgeDirection}\n\nGive your round-${round} position.`,
@@ -899,11 +1055,9 @@ export async function POST(request: NextRequest) {
                 maxTokens: 900,
                 reasoning: { effort: "none", exclude: true },
                 messages: [
-                  {
-                    role: "system",
-                    content:
-                      "You are the Judge. Compare Debater A vs Debater B and return strict JSON only with keys: convergence_score (0-100), converged (boolean), synthesis, direction_for_next_round, unresolved_points (string array), clarifying_questions (string array), final_direction. Keep synthesis concise and avoid code unless explicitly requested.",
-                  },
+                  withSafetySystem(
+                    "You are the Judge. Compare Debater A vs Debater B and return strict JSON only with keys: convergence_score (0-100), converged (boolean), synthesis, direction_for_next_round, unresolved_points (string array), clarifying_questions (string array), final_direction. Keep synthesis concise and avoid code unless explicitly requested."
+                  ),
                   {
                     role: "user",
                     content: `Task: ${taskMessage}\n\nDebater A:\n${latestA}\n\nDebater B:\n${latestB}\n\nCurrent round: ${round}\n\nIf convergence is high, set converged=true and final_direction. If convergence is low and this is final round (${MAX_CONVERGENCE_ROUNDS}), include 2-4 clarifying_questions.`,
@@ -963,11 +1117,9 @@ export async function POST(request: NextRequest) {
                 maxTokens: 1100,
                 reasoning: { effort: "none", exclude: true },
                 messages: [
-                  {
-                    role: "system",
-                    content:
-                      "You are the Execution Agent. Turn the judge's converged direction into the final response for the user. Be concrete, actionable, concise, and chat-aware. Do not include code unless explicitly requested.",
-                  },
+                  withSafetySystem(
+                    "You are the Execution Agent. Turn the judge's converged direction into the final response for the user. Be concrete, actionable, concise, and chat-aware. Do not include code unless explicitly requested."
+                  ),
                   {
                     role: "user",
                     content: `Task: ${taskMessage}\n\nJudge final direction:\n${finalDirection}\n\nDebater A final:\n${latestA}\n\nDebater B final:\n${latestB}\n\nProduce the final answer.`,
@@ -1055,7 +1207,6 @@ export async function POST(request: NextRequest) {
     }
 
     const enableThinking = convergentThinking;
-    const rawTask = message || "Analyze the uploaded file.";
     let nonConvergentTask = rawTask;
 
     if (hasImage) {
@@ -1144,10 +1295,7 @@ export async function POST(request: NextRequest) {
       });
     }
     const baseMessages: ChatMessage[] = [
-      {
-        role: "system",
-        content: CHAT_SYSTEM_PROMPT,
-      },
+      withSafetySystem(CHAT_SYSTEM_PROMPT),
       {
         role: "user",
         content: nonConvergentTask,

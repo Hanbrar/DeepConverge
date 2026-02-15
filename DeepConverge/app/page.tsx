@@ -62,6 +62,37 @@ const AGENTIC_MODELS: Record<AgenticModel, { label: string; display: string }> =
   },
 };
 
+const BLOCKED_DEBATE_TOPIC_PATTERNS: RegExp[] = [
+  /\b(suicide|self-harm|kill myself|how to die)\b/i,
+  /\b(rape|sexual assault|child porn|cp|incest)\b/i,
+  /\b(bomb|explosive|terror attack|mass shooting|ethnic cleansing)\b/i,
+  /\b(genocide|racial superiority|hate crime)\b/i,
+  /\b(how to make meth|hard drug recipe|weapon build)\b/i,
+  /\b(election|vote|voting|campaign|candidate|senate|congress|prime minister|president)\b/i,
+  /\b(israel|palestine|ukraine|russia|china[-\s]?taiwan|geopolitical)\b/i,
+];
+
+function validateDebateTopic(topic: string): { allowed: boolean; message?: string } {
+  const trimmed = topic.trim();
+  if (trimmed.length < 6) {
+    return { allowed: false, message: "Please enter a clearer debate topic." };
+  }
+  if (trimmed.length > 240) {
+    return {
+      allowed: false,
+      message: "Debate topics must be under 240 characters for now.",
+    };
+  }
+  if (BLOCKED_DEBATE_TOPIC_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+    return {
+      allowed: false,
+      message:
+        "This topic is blocked for safety. Please choose a neutral, constructive topic.",
+    };
+  }
+  return { allowed: true };
+}
+
 export default function Home() {
   // Core mode state
   const [mode, setMode] = useState<Mode>("agentic");
@@ -92,6 +123,7 @@ export default function Home() {
   const [debateQuestion, setDebateQuestion] = useState("");
   const [debateType, setDebateType] = useState<DebateType>("regular");
   const [continuousRounds, setContinuousRounds] = useState(3);
+  const [debateGuardError, setDebateGuardError] = useState<string | null>(null);
 
   // Sidebar state
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -183,6 +215,7 @@ export default function Home() {
     setMode("debate");
     setDebatePhase("setup");
     setDebateQuestion("");
+    setDebateGuardError(null);
     setInput("");
   };
 
@@ -259,9 +292,13 @@ export default function Home() {
   );
 
   const stopGeneration = () => {
-    if (!isLoading || !abortControllerRef.current) return;
+    if (!isLoading) return;
     manualStopRef.current = true;
-    abortControllerRef.current.abort();
+    try {
+      abortControllerRef.current?.abort();
+    } catch {
+      // Ignore abort races (already aborted/cleaned up).
+    }
   };
 
   const handleAttachClick = () => {
@@ -623,17 +660,21 @@ export default function Home() {
         }
       }
     } catch (error) {
-      console.error("Error:", error);
-      const isTimeout = error instanceof Error && error.name === "AbortError";
+      const isAbortError =
+        (error instanceof DOMException && error.name === "AbortError") ||
+        (error instanceof Error && error.name === "AbortError");
+      if (!isAbortError) {
+        console.error("Error:", error);
+      }
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantMessage.id
             ? {
                 ...msg,
                 content:
-                  isTimeout && manualStopRef.current
+                  isAbortError && manualStopRef.current
                     ? (msg.content.trim() ? msg.content : "Generation stopped.")
-                    : isTimeout
+                    : isAbortError
                     ? "The request took too long. The reasoning above shows the progress made. Please try a simpler question or try again."
                     : "Sorry, there was an error. Please try again.",
                 status: undefined,
@@ -657,10 +698,16 @@ export default function Home() {
   // ── Debate helpers ───────────────────────────────────────────────────
   const startDebate = () => {
     if (!debateQuestion.trim()) return;
+    const check = validateDebateTopic(debateQuestion);
+    if (!check.allowed) {
+      setDebateGuardError(check.message || "This debate topic is not allowed.");
+      return;
+    }
+    setDebateGuardError(null);
     setDebatePhase("active");
   };
 
-  const debateRounds = debateType === "regular" ? 2 : continuousRounds;
+  const debateRounds = 2;
   // ── Derived values ───────────────────────────────────────────────────
   const sidebarWidth = sidebarOpen ? 240 : 56;
   const isAgenticMode = mode === "agentic";
@@ -739,19 +786,6 @@ export default function Home() {
               <>
                 <span className="flex-1 text-left">New Chat</span>
                 <span className="text-[10px] text-[#9ca3af] font-medium">Ctrl K</span>
-              </>
-            )}
-          </button>
-          <button
-            onClick={handleNewDebate}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-[#f3f4f6] transition-colors text-sm text-[#4b5563]"
-          >
-            <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            {sidebarOpen && (
-              <>
-                <span className="flex-1 text-left">New Debate</span>
               </>
             )}
           </button>
@@ -1088,12 +1122,23 @@ export default function Home() {
                     <input
                       type="text"
                       value={debateQuestion}
-                      onChange={(e) => setDebateQuestion(e.target.value)}
+                      onChange={(e) => {
+                        setDebateQuestion(e.target.value);
+                        if (debateGuardError) setDebateGuardError(null);
+                      }}
                       onKeyDown={(e) => e.key === "Enter" && startDebate()}
                       placeholder="e.g., Is AI going to replace programmers?"
                       className="w-full bg-[#fffaf2] rounded-xl px-4 py-3 border border-[#e5e7eb] outline-none focus:ring-2 focus:ring-[#7c6bf5]/30 focus:border-[#7c6bf5] text-[#2d2d2d] placeholder-[#9ca3af]"
                       tabIndex={!isAgenticMode ? 0 : -1}
                     />
+                    <p className="mt-2 text-xs text-[#6b7280]">
+                      Debate agents can make mistakes and may not have current information. Verify important facts.
+                    </p>
+                    {debateGuardError && (
+                      <p className="mt-2 text-xs text-[#b45309] bg-[#fffbeb] border border-[#fde68a] rounded-lg px-3 py-2">
+                        {debateGuardError}
+                      </p>
+                    )}
                   </div>
 
                   {/* Debate type */}
@@ -1126,10 +1171,12 @@ export default function Home() {
                       </button>
 
                       <button
-                        onClick={() => setDebateType("continuous")}
+                        onClick={() => {
+                          setDebateType("continuous");
+                        }}
                         className={`relative p-4 rounded-xl border-2 transition-all text-left ${
                           debateType === "continuous"
-                            ? "border-[#000000] bg-[#6b7280]/10 shadow-sm"
+                            ? "border-[#f59e0b] bg-[#fffbeb] shadow-sm"
                             : "border-[#e5e7eb] bg-[#fffaf2] hover:border-[#d1d5db]"
                         }`}
                         tabIndex={!isAgenticMode ? 0 : -1}
@@ -1137,10 +1184,10 @@ export default function Home() {
                         <div className="text-2xl mb-2">&#128260;</div>
                         <div className="font-medium text-[#2d2d2d] text-sm">Continuous</div>
                         <div className="text-xs text-[#6b7280] mt-1">
-                          Set custom rounds (up to 5)
+                          Coming Soon
                         </div>
                         {debateType === "continuous" && (
-                          <div className="absolute top-2 right-2 w-5 h-5 bg-[#6b7280] rounded-full flex items-center justify-center">
+                          <div className="absolute top-2 right-2 w-5 h-5 bg-[#f59e0b] rounded-full flex items-center justify-center">
                             <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
                             </svg>
@@ -1149,8 +1196,14 @@ export default function Home() {
                       </button>
                     </div>
 
-                    {/* Round slider for continuous mode */}
                     {debateType === "continuous" && (
+                      <p className="mt-4 text-xs text-[#b45309] bg-[#fffbeb] border border-[#fde68a] rounded-lg px-3 py-2">
+                        Continuous mode is coming soon. Debate currently runs in regular mode only.
+                      </p>
+                    )}
+
+                    {/* Round slider for continuous mode */}
+                    {false && debateType === "continuous" && (
                       <div className="mt-4 bg-[#fffaf2] rounded-xl p-4 border border-[#e5e7eb]">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-sm text-[#4b5563]">Number of rounds</span>
@@ -1180,7 +1233,7 @@ export default function Home() {
                   {/* Start button */}
                   <button
                     onClick={startDebate}
-                    disabled={!debateQuestion.trim()}
+                    disabled={!debateQuestion.trim() || debateType === "continuous"}
                     className="w-full py-3.5 bg-[#000000] text-white rounded-xl font-medium text-base hover:bg-[#1f2937] transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-[#000000]/20"
                     tabIndex={!isAgenticMode ? 0 : -1}
                   >

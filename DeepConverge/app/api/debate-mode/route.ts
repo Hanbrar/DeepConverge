@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MODEL = "nvidia/nemotron-nano-9b-v2:free";
+const TOPIC_GUARD_MODEL = "nvidia/nemotron-nano-9b-v2:free";
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 interface ChatMessage {
@@ -19,6 +20,21 @@ interface SearchResult {
   title: string;
   url: string;
   snippet: string;
+}
+
+interface TopicGuardResult {
+  allow: boolean;
+  category:
+    | "safe"
+    | "violence_or_abuse"
+    | "sexual_or_exploitative"
+    | "hate_or_extremism"
+    | "self_harm"
+    | "illegal_activity"
+    | "political_or_geopolitical"
+    | "high_risk_advice"
+    | "other";
+  reason: string;
 }
 
 // ── System prompts ──────────────────────────────────────────────────
@@ -64,6 +80,44 @@ function stripUrls(text: string): string {
     .replace(/\b\w+\.(?:com|org|net|edu|gov|io)\S*/gi, "")
     .replace(/  +/g, " ")
     .trim();
+}
+
+function extractGuardJson(raw: string): TopicGuardResult | null {
+  const fenced = raw.match(/```json\s*([\s\S]*?)```/i)?.[1];
+  const candidate =
+    fenced ??
+    raw.match(/\{[\s\S]*\}/)?.[0] ??
+    "";
+  if (!candidate) return null;
+
+  try {
+    const parsed = JSON.parse(candidate) as Record<string, unknown>;
+    const categoryRaw =
+      typeof parsed.category === "string" ? parsed.category : "other";
+    const category: TopicGuardResult["category"] =
+      categoryRaw === "safe" ||
+      categoryRaw === "violence_or_abuse" ||
+      categoryRaw === "sexual_or_exploitative" ||
+      categoryRaw === "hate_or_extremism" ||
+      categoryRaw === "self_harm" ||
+      categoryRaw === "illegal_activity" ||
+      categoryRaw === "political_or_geopolitical" ||
+      categoryRaw === "high_risk_advice" ||
+      categoryRaw === "other"
+        ? categoryRaw
+        : "other";
+
+    return {
+      allow: parsed.allow === true,
+      category,
+      reason:
+        typeof parsed.reason === "string" && parsed.reason.trim()
+          ? parsed.reason.trim()
+          : "Topic did not pass moderation.",
+    };
+  } catch {
+    return null;
+  }
 }
 
 // ── Smart extraction ────────────────────────────────────────────────
@@ -274,6 +328,103 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const BLOCKED_DEBATE_TOPIC_PATTERNS: RegExp[] = [
+  /\b(suicide|self-harm|kill myself|how to die)\b/i,
+  /\b(rape|sexual assault|child porn|cp|incest)\b/i,
+  /\b(bomb|explosive|terror attack|mass shooting|ethnic cleansing)\b/i,
+  /\b(genocide|racial superiority|hate crime)\b/i,
+  /\b(how to make meth|hard drug recipe|weapon build)\b/i,
+  /\b(election|vote|voting|campaign|candidate|senate|congress|prime minister|president)\b/i,
+  /\b(israel|palestine|ukraine|russia|china[-\s]?taiwan|geopolitical)\b/i,
+];
+
+function validateDebateQuestion(question: string): {
+  allowed: boolean;
+  error?: string;
+} {
+  const trimmed = question.trim();
+  if (trimmed.length < 6) {
+    return { allowed: false, error: "Please provide a clearer debate topic." };
+  }
+  if (trimmed.length > 240) {
+    return {
+      allowed: false,
+      error: "Debate topics must be under 240 characters for now.",
+    };
+  }
+  if (BLOCKED_DEBATE_TOPIC_PATTERNS.some((pattern) => pattern.test(trimmed))) {
+    return {
+      allowed: false,
+      error:
+        "This debate topic is blocked for safety. Please use a neutral, constructive topic.",
+    };
+  }
+  return { allowed: true };
+}
+
+async function moderateDebateQuestionWithGuardModel(
+  question: string
+): Promise<TopicGuardResult> {
+  if (!OPENROUTER_API_KEY) {
+    throw new Error("OPENROUTER_API_KEY not configured");
+  }
+
+  const response = await fetch(OPENROUTER_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "HTTP-Referer": process.env.NEXT_PUBLIC_SITE_URL || "http://localhost:3000",
+      "X-Title": "DeepConverge Debate Topic Guard",
+    },
+    body: JSON.stringify({
+      model: TOPIC_GUARD_MODEL,
+      stream: false,
+      temperature: 0,
+      max_tokens: 220,
+      reasoning: { effort: "none", exclude: true },
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You are a safety gate for an entertainment/academic debate app.",
+            "Classify whether the topic is allowed.",
+            "Block violent abuse, sexual exploitation, self-harm, hate/extremism, illegal wrongdoing, and high-risk advice.",
+            "Also block politically sensitive or geopolitical topics (elections, campaigns, politicians, conflicts).",
+            "Allow only neutral, constructive, low-risk topics suitable for general audiences.",
+            "Respond with strict JSON only:",
+            '{"allow": boolean, "category": "safe|violence_or_abuse|sexual_or_exploitative|hate_or_extremism|self_harm|illegal_activity|political_or_geopolitical|high_risk_advice|other", "reason": "short reason"}',
+          ].join(" "),
+        },
+        {
+          role: "user",
+          content: `Debate topic: "${question.trim()}"`,
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Topic guard API error: ${response.status} - ${errText}`);
+  }
+
+  const payload = await response.json();
+  const firstChoice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
+  const raw =
+    extractText(firstChoice?.message?.content) ||
+    extractText(firstChoice?.message?.reasoning);
+  const parsed = extractGuardJson(raw);
+  if (parsed) return parsed;
+
+  // Fail closed if guard output is malformed.
+  return {
+    allow: false,
+    category: "other",
+    reason: "Topic guard could not validate this request safely.",
+  };
+}
+
 // ── Wikipedia Search ────────────────────────────────────────────────
 
 async function searchWikipedia(query: string, limit = 3): Promise<SearchResult[]> {
@@ -438,10 +589,56 @@ export async function POST(request: NextRequest) {
         headers: { "Content-Type": "application/json" },
       });
     }
+    const moderation = validateDebateQuestion(question);
+    if (!moderation.allowed) {
+      return new Response(
+        JSON.stringify({
+          error:
+            moderation.error ||
+            "This debate topic is blocked for safety.",
+        }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
     if (!OPENROUTER_API_KEY) {
       return new Response(
         JSON.stringify({ error: "OPENROUTER_API_KEY not configured" }),
         { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    let guardResult: TopicGuardResult;
+    try {
+      guardResult = await moderateDebateQuestionWithGuardModel(question);
+    } catch (error) {
+      console.error("Topic guard error:", error);
+      return new Response(
+        JSON.stringify({
+          error:
+            "Debate topic safety check is temporarily unavailable. Please try again.",
+        }),
+        {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    if (!guardResult.allow) {
+      return new Response(
+        JSON.stringify({
+          error:
+            "This topic is blocked in Debate Mode. Please choose a neutral, academic, or entertainment topic.",
+          reason: guardResult.reason,
+          category: guardResult.category,
+        }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }
       );
     }
 

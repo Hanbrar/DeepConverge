@@ -77,6 +77,8 @@ export default function DebateCanvas({
   const [messages, setMessages] = useState<DebateMessage[]>([]);
   const [loadingLabel, setLoadingLabel] = useState("Preparing debate...");
   const [loadingProgress, setLoadingProgress] = useState(0);
+  const [isGenerationStopped, setIsGenerationStopped] = useState(false);
+  const [stopMessage, setStopMessage] = useState<string | null>(null);
   const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
   const [logExpanded, setLogExpanded] = useState(false);
   const [researchSources, setResearchSources] = useState<{
@@ -92,8 +94,9 @@ export default function DebateCanvas({
   const phaseRef = useRef<Phase>("loading");
   const rafRef = useRef<number | null>(null);
   const lastTickRef = useRef(0);
-  const startedRef = useRef(false);
   const logRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const stoppedRef = useRef(false);
 
   useEffect(() => {
     phaseRef.current = phase;
@@ -102,14 +105,17 @@ export default function DebateCanvas({
   // ── PRELOAD DEBATE ─────────────────────────────────────────────────
 
   useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
     preloadDebate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const preloadDebate = async () => {
     setPhase("loading");
+    setIsGenerationStopped(false);
+    setStopMessage(null);
+    stoppedRef.current = false;
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     const collected: DebateMessage[] = [];
     // 2 research-done + moderator + rounds*2 + verdict
     const totalSteps = 4 + rounds * 2;
@@ -120,9 +126,33 @@ export default function DebateCanvas({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question, rounds }),
+        signal: controller.signal,
       });
 
-      if (!response.ok) throw new Error(`API error: ${response.status}`);
+      if (!response.ok) {
+        let errorText = `API error: ${response.status}`;
+        try {
+          const payload = await response.json();
+          if (payload && typeof payload.error === "string") {
+            errorText = payload.error;
+          }
+          if (
+            payload &&
+            typeof payload.reason === "string" &&
+            payload.reason.trim()
+          ) {
+            errorText = `${errorText} ${payload.reason.trim()}`;
+          }
+        } catch {
+          // Ignore JSON parsing errors and keep status-based message.
+        }
+        setLoadingLabel(
+          response.status === 400 ? "Debate topic blocked." : "Debate failed."
+        );
+        setStopMessage(errorText);
+        setIsGenerationStopped(true);
+        return;
+      }
 
       const reader = response.body?.getReader();
       if (!reader) throw new Error("No response body");
@@ -131,6 +161,7 @@ export default function DebateCanvas({
       let buffer = "";
 
       while (true) {
+        if (stoppedRef.current) break;
         const { done, value } = await reader.read();
         if (done) break;
 
@@ -205,16 +236,50 @@ export default function DebateCanvas({
         }
       }
     } catch (error) {
+      const isAbortError =
+        (error instanceof DOMException && error.name === "AbortError") ||
+        (error instanceof Error && error.name === "AbortError");
+      if (isAbortError && stoppedRef.current) {
+        setLoadingLabel("Debate stopped.");
+        setStopMessage("Debate stopped. No further generation will run.");
+        setIsGenerationStopped(true);
+        return;
+      }
+      if (isAbortError) {
+        // Ignore non-manual aborts (e.g., transient remounts in dev).
+        return;
+      }
       console.error("Debate preload error:", error);
+      setLoadingLabel("Debate failed.");
+      setStopMessage(
+        error instanceof Error ? error.message : "Debate failed to start. Please try again."
+      );
+      setIsGenerationStopped(true);
+      return;
+    } finally {
+      abortControllerRef.current = null;
     }
 
+    if (stoppedRef.current) return;
     preloadedRef.current = collected;
     nextIndexRef.current = 0;
     waitingRef.current = false;
     setLoadingProgress(100);
 
     // Small pause before starting presentation
-    setTimeout(() => setPhase("presenting"), 400);
+    setTimeout(() => {
+      if (!stoppedRef.current) setPhase("presenting");
+    }, 400);
+  };
+
+  const stopDebateGeneration = () => {
+    if (phase !== "loading" || stoppedRef.current) return;
+    stoppedRef.current = true;
+    setIsGenerationStopped(true);
+    setLoadingLabel("Debate stopped.");
+    setStopMessage("Debate stopped. No further generation will run.");
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
   };
 
   // ── TYPEWRITER ─────────────────────────────────────────────────────
@@ -328,6 +393,8 @@ export default function DebateCanvas({
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, []);
@@ -525,6 +592,19 @@ export default function DebateCanvas({
             <p className="text-sm text-gray-500 font-medium">
               {loadingLabel}
             </p>
+            {stopMessage && (
+              <p className="text-xs text-[#9a3412] bg-[#fffbeb] border border-[#fde68a] rounded-lg px-3 py-2 text-center w-full">
+                {stopMessage}
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={stopDebateGeneration}
+              disabled={isGenerationStopped}
+              className="mt-1 px-4 py-2 rounded-lg border border-[#d1d5db] text-sm font-medium text-[#4b5563] bg-white hover:bg-[#f8fafc] transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              {isGenerationStopped ? "Stopped" : "Stop Debate"}
+            </button>
           </div>
         </main>
       </div>
