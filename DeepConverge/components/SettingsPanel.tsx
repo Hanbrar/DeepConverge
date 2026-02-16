@@ -16,6 +16,8 @@ interface SettingsPanelProps {
 }
 
 type KeyStatus = "idle" | "verifying" | "valid" | "invalid";
+const TUTORIAL_VIDEO_URL = "https://www.youtube.com/watch?v=CN_LuPK3PTQ";
+const TUTORIAL_EMBED_URL = "https://www.youtube.com/embed/CN_LuPK3PTQ";
 
 export default function SettingsPanel({
   onClose,
@@ -31,6 +33,7 @@ export default function SettingsPanel({
   const [keyError, setKeyError] = useState<string | null>(null);
   const [nameInput, setNameInput] = useState(displayName || "");
   const [nameSaved, setNameSaved] = useState(false);
+  const [showTutorialPreview, setShowTutorialPreview] = useState(false);
 
   const handleVerifyKey = async () => {
     const trimmed = keyInput.trim();
@@ -274,12 +277,49 @@ export default function SettingsPanel({
             </p>
           </div>
 
-          {/* Tutorial placeholder */}
-          <div className="border border-dashed border-[#e5e7eb] rounded-xl p-4">
-            <h3 className="text-sm font-medium text-[#4b5563] mb-1">Tutorial</h3>
-            <p className="text-xs text-[#9ca3af]">
-              Tutorial coming soon. We&apos;ll walk you through getting your API key and using DeepConverge.
+          {/* Tutorial */}
+          <div className="rounded-xl border border-[#e5e7eb] bg-white p-4">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <h3 className="text-sm font-medium text-[#4b5563]">Tutorial</h3>
+              <button
+                type="button"
+                onClick={() => setShowTutorialPreview((prev) => !prev)}
+                className="text-xs font-medium text-[#7c6bf5] hover:underline"
+              >
+                {showTutorialPreview ? "Hide preview" : "Show preview"}
+              </button>
+            </div>
+
+            <p className="text-xs text-[#9ca3af] mb-3">
+              Quick walkthrough for setup and usage.
             </p>
+
+            {showTutorialPreview && (
+              <div className="overflow-hidden rounded-lg border border-[#e5e7eb] mb-3">
+                <iframe
+                  src={TUTORIAL_EMBED_URL}
+                  title="DeepConverge tutorial"
+                  className="w-full h-36"
+                  loading="lazy"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  referrerPolicy="strict-origin-when-cross-origin"
+                  allowFullScreen
+                />
+              </div>
+            )}
+
+            <a
+              href={TUTORIAL_VIDEO_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-[#7c6bf5] hover:underline"
+            >
+              Open on YouTube
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 3h7v7m0-7L10 14" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5v14h14" />
+              </svg>
+            </a>
           </div>
         </div>
       </div>
