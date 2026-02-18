@@ -441,7 +441,7 @@ export default function Home() {
     setMode(nextMode);
   };
 
-  const activeModel: AgenticModel = convergentEnabled ? "nemotron30b" : "nemotron9b";
+  const activeModel: AgenticModel = "nemotron30b";
 
   const formatGeneratedAt = (iso: string | undefined) => {
     if (!iso) return "";
@@ -1854,7 +1854,10 @@ export default function Home() {
               >
                 <div className="space-y-6">
                   <p className="text-center text-[#6b7280] text-sm">
-                    Watch two AI debaters go head-to-head with a moderator powered by NVIDIA Nemotron via OpenRouter
+                    Watch two AI debaters go head-to-head with a moderator
+                  </p>
+                  <p className="text-center text-[#b0b5be] text-xs -mt-4">
+                    Powered by NVIDIA Nemotron via OpenRouter
                   </p>
 
                   {/* Debate topic input */}
@@ -1988,10 +1991,7 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Footer */}
-              <p className="text-xs text-[#9ca3af] text-center mt-6">
-                Powered by NVIDIA Nemotron via OpenRouter
-              </p>
+              {/* Footer removed — branding is in the debate mode description */}
             </div>
           </main>
         ) : (
