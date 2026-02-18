@@ -804,8 +804,8 @@ export async function POST(request: NextRequest) {
 
     }
 
-    // Product rule: Convergent Off -> 9B chat model, Convergent On -> 30B workflow model.
-    const resolvedModel: ChatModel = convergentThinking ? "nemotron30b" : "nemotron9b";
+    // Always use 30B model. Convergent ON = reasoning mode, OFF = basic prompt.
+    const resolvedModel: ChatModel = "nemotron30b";
     const resolvedModelId = MODEL_IDS[resolvedModel];
 
     if (convergentThinking) {
@@ -1359,7 +1359,7 @@ export async function POST(request: NextRequest) {
               messages,
               stream: true,
               temperature: enableThinking ? 0.7 : 0.45,
-              max_tokens: resolvedModel === "nemotron9b" ? 4096 : 8192,
+              max_tokens: 8192,
             };
             if (includeReasoning && enableThinking) {
               p.reasoning = { effort: "high" };
@@ -1372,23 +1372,6 @@ export async function POST(request: NextRequest) {
             headers: requestHeaders,
             body: JSON.stringify(buildPayload(true)),
           });
-
-          if (
-            !response.ok &&
-            resolvedModel === "nemotron9b" &&
-            !enableThinking
-          ) {
-            const initialError = await response.text();
-            console.warn(
-              "9B request failed; retrying without reasoning hints:",
-              initialError
-            );
-            response = await fetch(OPENROUTER_API_URL, {
-              method: "POST",
-              headers: requestHeaders,
-              body: JSON.stringify(buildPayload(false)),
-            });
-          }
 
           if (!response.ok) {
             const errText = await response.text();

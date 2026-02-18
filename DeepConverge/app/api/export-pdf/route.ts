@@ -26,6 +26,44 @@ async function createSupabaseClient() {
   );
 }
 
+/** Convert LaTeX expressions into readable plain text for PDF */
+function cleanLatex(expr: string): string {
+  return expr
+    .replace(/\\frac\{([^}]*)\}\{([^}]*)\}/g, "($1/$2)")
+    .replace(/\\sqrt\{([^}]*)\}/g, "sqrt($1)")
+    .replace(/\\times/g, "\u00d7")
+    .replace(/\\cdot/g, "\u00b7")
+    .replace(/\\pm/g, "\u00b1")
+    .replace(/\\leq/g, "\u2264")
+    .replace(/\\geq/g, "\u2265")
+    .replace(/\\neq/g, "\u2260")
+    .replace(/\\approx/g, "\u2248")
+    .replace(/\\infty/g, "\u221e")
+    .replace(/\\pi/g, "\u03c0")
+    .replace(/\\alpha/g, "\u03b1")
+    .replace(/\\beta/g, "\u03b2")
+    .replace(/\\gamma/g, "\u03b3")
+    .replace(/\\delta/g, "\u03b4")
+    .replace(/\\theta/g, "\u03b8")
+    .replace(/\\lambda/g, "\u03bb")
+    .replace(/\\sigma/g, "\u03c3")
+    .replace(/\\sum/g, "\u2211")
+    .replace(/\\int/g, "\u222b")
+    .replace(/\\partial/g, "\u2202")
+    .replace(/\\nabla/g, "\u2207")
+    .replace(/\\rightarrow/g, "\u2192")
+    .replace(/\\leftarrow/g, "\u2190")
+    .replace(/\\Rightarrow/g, "\u21d2")
+    .replace(/\^2/g, "\u00b2")
+    .replace(/\^3/g, "\u00b3")
+    .replace(/\^n/g, "\u207f")
+    .replace(/\^{([^}]*)}/g, "^($1)")
+    .replace(/_{([^}]*)}/g, "_($1)")
+    .replace(/\\[a-zA-Z]+/g, "")  // Remove remaining unknown commands
+    .replace(/[{}]/g, "")          // Remove leftover braces
+    .trim();
+}
+
 export async function GET() {
   try {
     const supabase = await createSupabaseClient();
@@ -189,8 +227,13 @@ export async function GET() {
         doc.text(roleLabel, margin, y);
         y += 5;
 
-        // Content — strip markdown for cleaner PDF
+        // Content — strip markdown, preserve math readably
         const cleanContent = msg.content
+          // Display math: $$...$$ → content on its own line
+          .replace(/\$\$([\s\S]*?)\$\$/g, (_: string, expr: string) => cleanLatex(expr.trim()))
+          // Inline math: $...$ → readable expression
+          .replace(/\$([^$]+)\$/g, (_: string, expr: string) => cleanLatex(expr))
+          // Markdown
           .replace(/#{1,6}\s/g, "")
           .replace(/\*\*(.*?)\*\*/g, "$1")
           .replace(/\*(.*?)\*/g, "$1")

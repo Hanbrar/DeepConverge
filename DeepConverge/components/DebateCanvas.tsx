@@ -20,6 +20,7 @@ interface DebateCanvasProps {
   apiKey: string;
   onComplete?: () => void;
   onDebateFinished?: (messages: { speaker: string; content: string }[]) => void;
+  replayMessages?: { speaker: string; content: string }[];
 }
 
 type Phase = "loading" | "presenting" | "complete";
@@ -75,6 +76,7 @@ export default function DebateCanvas({
   apiKey,
   onComplete,
   onDebateFinished,
+  replayMessages,
 }: DebateCanvasProps) {
   // ── State ──
   const [phase, setPhase] = useState<Phase>("loading");
@@ -109,6 +111,20 @@ export default function DebateCanvas({
   // ── PRELOAD DEBATE ─────────────────────────────────────────────────
 
   useEffect(() => {
+    if (replayMessages && replayMessages.length > 0) {
+      // Replay mode: skip SSE, render pre-loaded messages instantly
+      const replayed: DebateMessage[] = replayMessages.map((m, i) => ({
+        id: `replay-${i}`,
+        speaker: m.speaker as "moderator" | "blue" | "red",
+        content: m.content,
+        displayedContent: m.content, // fully displayed immediately
+        isVerdict: i === replayMessages.length - 1 && m.speaker === "moderator",
+        round: undefined,
+      }));
+      setMessages(replayed);
+      setPhase("complete");
+      return;
+    }
     preloadDebate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

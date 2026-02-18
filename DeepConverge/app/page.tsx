@@ -146,6 +146,7 @@ export default function Home() {
   const [debateType, setDebateType] = useState<DebateType>("regular");
   const [continuousRounds, setContinuousRounds] = useState(3);
   const [debateGuardError, setDebateGuardError] = useState<string | null>(null);
+  const [debateReplayMessages, setDebateReplayMessages] = useState<{ speaker: string; content: string }[] | null>(null);
 
   // Sidebar state
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -276,6 +277,29 @@ export default function Home() {
   const handleLoadConversation = async (conv: Conversation) => {
     const supabase = createClient();
     const dbMessages = await loadMessages(supabase, conv.id);
+
+    if (conv.mode === "debate") {
+      // Map debate roles back to DebateCanvas speaker format
+      const roleMap: Record<string, string> = {
+        debater_blue: "blue",
+        debater_red: "red",
+        moderator: "moderator",
+      };
+      const replay = dbMessages
+        .filter((m) => roleMap[m.role])
+        .map((m) => ({
+          speaker: roleMap[m.role],
+          content: m.content,
+        }));
+      setDebateReplayMessages(replay);
+      setDebateQuestion(conv.title);
+      setActiveConversationId(conv.id);
+      setMessages([]);
+      setMode("debate");
+      setDebatePhase("active");
+      return;
+    }
+
     const loaded: Message[] = dbMessages.map((m) => ({
       id: m.id,
       role: m.role as "user" | "assistant",
@@ -969,6 +993,7 @@ export default function Home() {
       return;
     }
     setDebateGuardError(null);
+    setDebateReplayMessages(null); // Clear replay — this is a live debate
     setDebatePhase("active");
 
     // Create debate conversation in DB
@@ -1536,10 +1561,12 @@ export default function Home() {
         {isDebateActive ? (
           <div className="flex-1 min-h-0">
             <DebateCanvas
+              key={activeConversationId || "live"}
               question={debateQuestion}
               rounds={debateRounds}
               apiKey={openrouterApiKey || ""}
               onDebateFinished={handleDebateFinished}
+              replayMessages={debateReplayMessages || undefined}
             />
           </div>
         ) : isLanding ? (
@@ -1827,7 +1854,7 @@ export default function Home() {
               >
                 <div className="space-y-6">
                   <p className="text-center text-[#6b7280] text-sm">
-                    Watch two AI debaters go head-to-head with a moderator
+                    Watch two AI debaters go head-to-head with a moderator powered by NVIDIA Nemotron via OpenRouter
                   </p>
 
                   {/* Debate topic input */}
@@ -1963,7 +1990,7 @@ export default function Home() {
 
               {/* Footer */}
               <p className="text-xs text-[#9ca3af] text-center mt-6">
-                Powered by NVIDIA Nemotron via OpenRouter &middot; Made by Hanryck Brar
+                Powered by NVIDIA Nemotron via OpenRouter
               </p>
             </div>
           </main>
