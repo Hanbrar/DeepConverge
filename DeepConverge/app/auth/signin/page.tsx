@@ -51,13 +51,15 @@ function SignInForm() {
       const supabase = createClient();
 
       if (isSignUp) {
-        const { error } = await supabase.auth.signUp({
+        const { data: signUpData, error } = await supabase.auth.signUp({
           email,
           password,
           options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
         });
         if (error) {
           setError(error.message);
+        } else if (signUpData.user?.identities?.length === 0) {
+          setError("This email is already registered. Use the Google button above or click Sign In below.");
         } else {
           setSuccessMessage("Check your email for a confirmation link.");
         }
@@ -67,7 +69,11 @@ function SignInForm() {
           password,
         });
         if (error) {
-          setError(error.message);
+          if (error.message.toLowerCase().includes("invalid login credentials")) {
+            setError("Incorrect email or password. If you signed up with Google, try the button above.");
+          } else {
+            setError(error.message);
+          }
         } else {
           router.push("/");
         }
